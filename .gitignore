@@ -1,0 +1,16 @@
+# Ignore .env files
+.env
+.env.*
+
+# Ignore any "env" directories (e.g., /env/, /some/path/env/)
+env/
+**/env/
+
+# Ignore logs directories
+logs/
+**/logs/
+
+# Ignore markdown folders
+markdown/
+**/markdown/
+documents/markdown/

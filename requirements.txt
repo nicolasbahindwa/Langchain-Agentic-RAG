@@ -1,0 +1,37 @@
+
+# Core dependencies for the simplified configuration system
+python-dotenv
+colorama
+
+# Optional dependencies - uncomment as needed:
+
+# Web Frameworks
+# flask>=2.3.0
+# flask-cors>=4.0.0
+# fastapi>=0.100.0
+# uvicorn>=0.23.0
+
+# Database
+# psycopg2-binary>=2.9.0  # PostgreSQL
+# redis>=4.6.0            # Redis
+
+# API Clients
+# openai>=1.0.0           # OpenAI
+# anthropic>=0.3.0        # Anthropic
+# boto3>=1.28.0           # AWS
+
+
+# langchain
+langchain-community
+langchain-anthropic
+langchain-openai
+langchain-ollama
+langchain-core
+langchain-huggingface
+langgraph
+
+
+faiss-cpu
+sentence-transformers
+
+markitdown[all]
