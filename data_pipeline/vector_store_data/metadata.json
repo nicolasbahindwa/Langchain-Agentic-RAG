@@ -1,6 +1,6 @@
 {
   "total_documents": 7,
-  "processing_time": "2025-07-17T17:59:43.357355",
+  "processing_time": "2025-07-17T20:50:36.306080",
   "config": {
     "chunk_size": 800,
     "chunk_overlap": 150,
