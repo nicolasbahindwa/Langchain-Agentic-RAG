@@ -1,0 +1,14 @@
+{
+  "total_documents": 7,
+  "processing_time": "2025-07-17T17:59:43.357355",
+  "config": {
+    "chunk_size": 800,
+    "chunk_overlap": 150,
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "device": "cpu",
+    "max_retries": 3,
+    "batch_size": 32,
+    "similarity_threshold": 0.6,
+    "max_chunks_per_doc": 100
+  }
+}
