@@ -294,6 +294,208 @@ class LangchainConfig:
                 suggestion="Set LANGCHAIN_PROJECT when LANGCHAIN_TRACING=true"
             ))
 
+
+@dataclass
+class VectorStoreConfig:
+    """Vector store configuration"""
+    path: str
+    chunk_size: int
+    chunk_overlap: int
+    embedding_model: str
+    device: str
+    max_retries: int
+    batch_size: int
+    similarity_threshold: float
+    max_chunks_per_doc: int
+    enable_metadata_filtering: bool
+    
+    def validate(self) -> ValidationResult:
+        result = ValidationResult()
+        
+        # Validate path
+        if not self.path or not self.path.strip():
+            result.add_error(ValidationError(
+                "Vector store path required",
+                field="VECTOR_STORE_PATH",
+                suggestion="Set path for vector store data"
+            ))
+        else:
+            try:
+                Path(self.path).mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                result.add_error(ValidationError(
+                    f"Cannot create vector store directory: {e}",
+                    field="VECTOR_STORE_PATH",
+                    suggestion="Use a valid, writable directory path"
+                ))
+        
+        # Validate chunk settings
+        if self.chunk_size <= 0:
+            result.add_error(ValidationError(
+                "Chunk size must be positive",
+                field="VECTOR_CHUNK_SIZE",
+                suggestion="Use 500-2000 characters"
+            ))
+        elif self.chunk_size < 100:
+            result.add_warning("Very small chunk size may reduce context quality")
+        elif self.chunk_size > 4000:
+            result.add_warning("Very large chunk size may exceed model limits")
+        
+        if self.chunk_overlap < 0:
+            result.add_error(ValidationError(
+                "Chunk overlap cannot be negative",
+                field="VECTOR_CHUNK_OVERLAP",
+                suggestion="Use 0-500 characters"
+            ))
+        elif self.chunk_overlap >= self.chunk_size:
+            result.add_error(ValidationError(
+                "Chunk overlap must be less than chunk size",
+                field="VECTOR_CHUNK_OVERLAP",
+                suggestion=f"Use less than {self.chunk_size}"
+            ))
+        
+        # Validate similarity threshold
+        if not (0.0 <= self.similarity_threshold <= 1.0):
+            result.add_error(ValidationError(
+                "Similarity threshold must be 0.0-1.0",
+                field="VECTOR_SIMILARITY_THRESHOLD",
+                suggestion="Use 0.5-0.8 for most cases"
+            ))
+        
+        # Validate device
+        valid_devices = ['cpu', 'cuda', 'mps']
+        if self.device not in valid_devices:
+            result.add_error(ValidationError(
+                f"Invalid device '{self.device}'",
+                field="VECTOR_DEVICE",
+                suggestion=f"Use: {', '.join(valid_devices)}"
+            ))
+        
+        # Validate other numeric fields
+        if self.max_retries <= 0:
+            result.add_error(ValidationError(
+                "Max retries must be positive",
+                field="VECTOR_MAX_RETRIES",
+                suggestion="Use 1-10"
+            ))
+        
+        if self.batch_size <= 0:
+            result.add_error(ValidationError(
+                "Batch size must be positive",
+                field="VECTOR_BATCH_SIZE",
+                suggestion="Use 8-64"
+            ))
+        
+        if self.max_chunks_per_doc <= 0:
+            result.add_error(ValidationError(
+                "Max chunks per doc must be positive",
+                field="VECTOR_MAX_CHUNKS_PER_DOC",
+                suggestion="Use 50-500"
+            ))
+        
+        return result
+    
+    def is_configured(self) -> bool:
+        return bool(self.path and self.path.strip())
+    
+    def get_store_path(self) -> Path:
+        return Path(self.path)
+
+@dataclass
+class RAGConfig:
+    """RAG system configuration"""
+    documents_path: str
+    retrieval_k: int
+    rewrite_temperature: float
+    rewrite_max_tokens: int
+    answer_temperature: float
+    answer_max_tokens: int
+    enable_question_rewriting: bool
+    enable_context_compression: bool
+    max_context_length: int
+    fallback_to_general_knowledge: bool
+    
+    def validate(self) -> ValidationResult:
+        result = ValidationResult()
+        
+        # Validate documents path
+        if not self.documents_path or not self.documents_path.strip():
+            result.add_error(ValidationError(
+                "Documents path required",
+                field="RAG_DOCUMENTS_PATH",
+                suggestion="Set path to documents directory"
+            ))
+        else:
+            docs_path = Path(self.documents_path)
+            if not docs_path.exists():
+                result.add_warning(f"Documents directory does not exist: {self.documents_path}")
+            else:
+                # Check for supported file types
+                supported_extensions = {'.txt', '.md', '.pdf', '.docx'}
+                doc_files = [
+                    f for f in docs_path.rglob('*')
+                    if f.is_file() and f.suffix.lower() in supported_extensions
+                ]
+                if not doc_files:
+                    result.add_warning("No supported documents found in documents directory")
+        
+        # Validate retrieval settings
+        if self.retrieval_k <= 0:
+            result.add_error(ValidationError(
+                "Retrieval K must be positive",
+                field="RAG_RETRIEVAL_K",
+                suggestion="Use 3-10"
+            ))
+        elif self.retrieval_k > 20:
+            result.add_warning("High retrieval K may include irrelevant results")
+        
+        # Validate temperature settings
+        if not (0.0 <= self.rewrite_temperature <= 2.0):
+            result.add_error(ValidationError(
+                "Rewrite temperature must be 0.0-2.0",
+                field="RAG_REWRITE_TEMPERATURE",
+                suggestion="Use 0.1-0.5 for consistent rewrites"
+            ))
+        
+        if not (0.0 <= self.answer_temperature <= 2.0):
+            result.add_error(ValidationError(
+                "Answer temperature must be 0.0-2.0",
+                field="RAG_ANSWER_TEMPERATURE",
+                suggestion="Use 0.3-0.8 for balanced creativity"
+            ))
+        
+        # Validate token limits
+        if self.rewrite_max_tokens <= 0:
+            result.add_error(ValidationError(
+                "Rewrite max tokens must be positive",
+                field="RAG_REWRITE_MAX_TOKENS",
+                suggestion="Use 50-200"
+            ))
+        
+        if self.answer_max_tokens <= 0:
+            result.add_error(ValidationError(
+                "Answer max tokens must be positive",
+                field="RAG_ANSWER_MAX_TOKENS",
+                suggestion="Use 200-1000"
+            ))
+        
+        # Validate context length
+        if self.max_context_length <= 0:
+            result.add_error(ValidationError(
+                "Max context length must be positive",
+                field="RAG_MAX_CONTEXT_LENGTH",
+                suggestion="Use 2000-8000"
+            ))
+        
+        return result
+    
+    def is_configured(self) -> bool:
+        return bool(self.documents_path and self.documents_path.strip())
+    
+    def get_documents_path(self) -> Path:
+        return Path(self.documents_path)
+
+
 @dataclass
 class ServerConfig:
     """Server configuration"""
@@ -782,6 +984,34 @@ class Config:
             project=os.getenv("LANGSMITH_PROJECT")
         )
         
+       # Vector Store Config
+        self.vector_store = VectorStoreConfig(
+            path=os.getenv('VECTOR_STORE_PATH', 'data/vector_store'),
+            chunk_size=get_int('VECTOR_CHUNK_SIZE', 1000, min_val=100, max_val=8000),
+            chunk_overlap=get_int('VECTOR_CHUNK_OVERLAP', 200, min_val=0, max_val=1000),
+            embedding_model=os.getenv('VECTOR_EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2'),
+            device=os.getenv('VECTOR_DEVICE', 'cpu'),
+            max_retries=get_int('VECTOR_MAX_RETRIES', 3, min_val=1, max_val=10),
+            batch_size=get_int('VECTOR_BATCH_SIZE', 32, min_val=1, max_val=128),
+            similarity_threshold=float(os.getenv('VECTOR_SIMILARITY_THRESHOLD', '0.7')),
+            max_chunks_per_doc=get_int('VECTOR_MAX_CHUNKS_PER_DOC', 100, min_val=10, max_val=10000),
+            enable_metadata_filtering=get_bool('VECTOR_ENABLE_METADATA_FILTERING', True)
+        )
+        
+        # RAG Config
+        self.rag = RAGConfig(
+            documents_path=os.getenv('RAG_DOCUMENTS_PATH', 'documents'),
+            retrieval_k=get_int('RAG_RETRIEVAL_K', 4, min_val=1, max_val=20),
+            rewrite_temperature=float(os.getenv('RAG_REWRITE_TEMPERATURE', '0.3')),
+            rewrite_max_tokens=get_int('RAG_REWRITE_MAX_TOKENS', 100, min_val=20, max_val=500),
+            answer_temperature=float(os.getenv('RAG_ANSWER_TEMPERATURE', '0.7')),
+            answer_max_tokens=get_int('RAG_ANSWER_MAX_TOKENS', 300, min_val=50, max_val=2000),
+            enable_question_rewriting=get_bool('RAG_ENABLE_QUESTION_REWRITING', True),
+            enable_context_compression=get_bool('RAG_ENABLE_CONTEXT_COMPRESSION', False),
+            max_context_length=get_int('RAG_MAX_CONTEXT_LENGTH', 4000, min_val=1000, max_val=16000),
+            fallback_to_general_knowledge=get_bool('RAG_FALLBACK_TO_GENERAL_KNOWLEDGE', True)
+        )
+        
         # API Keys Config
         self.api_keys = APIKeysConfig(
             openai_api_key=os.getenv('OPENAI_API_KEY'),
@@ -831,6 +1061,8 @@ class Config:
             ("Email", self.email),
              ("Ollama", self.ollama),
             ("Logging", self.logging),
+            ("Vector Store", self.vector_store),  # Add this
+            ("RAG", self.rag), 
             
         ]
         
@@ -900,6 +1132,8 @@ class Config:
             'ollama': self.ollama.is_configured(),
             'openai': bool(self.api_keys.openai_api_key),
             'anthropic': bool(self.api_keys.anthropic_api_key),
+            'vector_store': self.vector_store.is_configured(),  # Add this
+            'rag': self.rag.is_configured(),                    # Add this
             'aws': bool(self.api_keys.aws_access_key_id and self.api_keys.aws_secret_access_key)
         }
     
@@ -917,7 +1151,38 @@ class Config:
             }
         except Exception as e:
             return {'status': 'error', 'message': str(e)}
+        
     
+    def get_service_status(self) -> Dict[str, bool]:
+        """Get status of all services"""
+        return {
+            'database': self.database.is_configured(),
+            'redis': self.redis.is_configured(),
+            'email': self.email.is_configured(),
+            'data_processing': self.data_processing.is_configured(), 
+            'ollama': self.ollama.is_configured(),
+            'vector_store': self.vector_store.is_configured(),  # Add this
+            'rag': self.rag.is_configured(),                    # Add this
+            'openai': bool(self.api_keys.openai_api_key),
+            'anthropic': bool(self.api_keys.anthropic_api_key),
+            'aws': bool(self.api_keys.aws_access_key_id and self.api_keys.aws_secret_access_key)
+        }
+        
+    def get_rag_vector_store_config(self):
+        """Get vector store config in the format expected by EnhancedVectorStore"""
+        from data_pipeline.vector_store import VectorStoreConfig as EVSConfig
+        
+        return EVSConfig(
+            chunk_size=self.vector_store.chunk_size,
+            chunk_overlap=self.vector_store.chunk_overlap,
+            embedding_model=self.vector_store.embedding_model,
+            device=self.vector_store.device,
+            max_retries=self.vector_store.max_retries,
+            batch_size=self.vector_store.batch_size,
+            similarity_threshold=self.vector_store.similarity_threshold,
+            max_chunks_per_doc=self.vector_store.max_chunks_per_doc
+        )
+            
     # =============================================================================
     # DISPLAY METHODS
     # =============================================================================

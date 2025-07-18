@@ -129,7 +129,7 @@ class LLMManager:
             return {
                 'enabled': enabled,
                 'base_url': base_url.rstrip('/') if base_url else '',
-                'default_model': 'llama3.2'
+                'default_model': 'mistral'
             }
         
         elif provider == LLMProvider.ANTHROPIC:
