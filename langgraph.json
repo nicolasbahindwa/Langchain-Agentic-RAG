@@ -1,0 +1,12 @@
+{
+    "dockerfile_lines": [],
+    "graphs": {
+        "lawyer": "./graph.py:graph"
+    },
+    "env": ".env",
+    "python_version": "3.11",
+    "dependencies": [
+        ".",
+        "requirements.txt"
+    ]
+}
