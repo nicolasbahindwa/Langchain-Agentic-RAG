@@ -20,71 +20,83 @@ llm = manager.get_chat_model(
 
 
 class State(MessagesState):
-    summary:str
-    
-def call_model(state:State):
+    summary: str = ""  # Provide default value
+
+def call_model(state: State):
     summary = state.get('summary', "")
     
+    print(f"DEBUG call_model: summary={summary}, messages_count={len(state['messages'])}")
+    
     if summary:
-        system_message = f"summary of conversation earlier {summary}"
-        
+        system_message = f"Summary of conversation earlier: {summary}"
         messages = [SystemMessage(content=system_message)] + state["messages"]
     else:
         messages = state["messages"]
     
     response = llm.invoke(messages)
     
-    return {"messages": response}
-
+    return {"messages": [response]}  # Return as list
 
 def summarize_conversation(state: State):
+    summary = state.get("summary", "")
+    messages_count = len(state["messages"])
     
-    summary =state.get("summary", "")
+    print(f"DEBUG summarize: current_summary={summary}, messages_count={messages_count}")
     
     if summary:
-        
-        summary_message= (
-            f"this is summary of the conversation to date: {summary}\n\n"
+        summary_message = (
+            f"This is summary of the conversation to date: {summary}\n\n"
             "Extend the summary taking into account the new messages above:"
         )
-    
     else:
         summary_message = "Create a summary of the conversation above:"
     
     messages = state["messages"] + [HumanMessage(content=summary_message)]
-    
     response = llm.invoke(messages)
     
+    # Keep last 2 messages, remove the rest
     delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-2]]
+    
+    print(f"DEBUG summarize: new_summary={response.content[:50]}...")
     
     return {"summary": response.content, "messages": delete_messages}
 
-
 def should_continue(state: State):
     messages = state["messages"]
+    count = len(messages)
     
-    if len(messages) > 6:
+    print(f"DEBUG should_continue: message_count={count}")
+    
+    if count > 6:
         return "summarize_conversation"
-    
+    return "end"
 
-    return END
-
-
-workflow = StateGraph(MessagesState)
+# Use the correct State type
+workflow = StateGraph(State)
 
 workflow.add_node("conversation", call_model)
 workflow.add_node("summarize_conversation", summarize_conversation)
 
 workflow.add_edge(START, "conversation")
 workflow.add_conditional_edges("conversation", should_continue, {
-        "summarize_conversation": "summarize_conversation",
-        END: END
-    })
-workflow.add_edge("summarize_conversation", "conversation")
-
+    "summarize_conversation": "summarize_conversation",
+    "end": END
+})
+workflow.add_edge("summarize_conversation", END)
 memory = MemorySaver()
 
 # graph = workflow.compile(checkpointer=memory)
 graph = workflow.compile()
  
- 
+
+# def test_graph():
+#     config = {"configurable": {"thread_id": "test"}}
+
+#     # Test with a few messages
+#     messages = [HumanMessage(content=f"Hello, this is message {i}") for i in range(8)]
+
+#     result = graph.invoke({"messages": messages}, config=config)
+#     print("Final result:", result)
+
+# if __name__ == "__main__":
+#     test_graph()
