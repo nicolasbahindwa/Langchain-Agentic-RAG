@@ -1,25 +1,14 @@
 from typing_extensions import TypedDict
-import random
-from typing import Literal, Annotated
 from langgraph.graph import StateGraph, START, END
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage
-from langgraph.graph.message import add_messages
-from langgraph.graph import MessagesState
 from pprint import pprint
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, RemoveMessage
+from langgraph.graph import MessagesState
 from core.llm_manager import LLMManager, LLMProvider
-from langgraph.prebuilt import ToolNode
-from langgraph.prebuilt import tools_condition
+from langgraph.checkpoint.memory import MemorySaver
 
-
-
-# class MessageState(MessagesState):
-#     messages:Annotated[list[AnyMessage], add_messages]
-
-
-
+ 
 
 manager = LLMManager()
-
 llm = manager.get_chat_model(
     provider = LLMProvider.ANTHROPIC,
     temperature=0.7,
@@ -29,34 +18,73 @@ llm = manager.get_chat_model(
 )
 
 
-def multiply(a:int, b:int)-> int:
-    """Multipy a and b
-    args:
-        a: first int
-        b: second int
-    """
-    return a * b
 
-llm_with_tools = llm.bind_tools([multiply])
-  
-
-# node
-def tool_calling_llm(state:MessagesState):
-    return {"messages":[llm_with_tools.invoke(state["messages"])]}
-
-
-builder = StateGraph(MessagesState)
-
-builder.add_node("tool_calling_llm", tool_calling_llm)
-builder.add_node("tools", ToolNode([multiply]))
+class State(MessagesState):
+    summary:str
+    
+def call_model(state:State):
+    summary = state.get('summary', "")
+    
+    if summary:
+        system_message = f"summary of conversation earlier {summary}"
+        
+        messages = [SystemMessage(content=system_message)] + state["messages"]
+    else:
+        messages = state["messages"]
+    
+    response = llm.invoke(messages)
+    
+    return {"messages": response}
 
 
-builder.add_edge(START, "tool_calling_llm")
-builder.add_conditional_edges("tool_calling_llm", tools_condition)
-builder.add_edge("tools", END)
+def summarize_conversation(state: State):
+    
+    summary =state.get("summary", "")
+    
+    if summary:
+        
+        summary_message= (
+            f"this is summary of the conversation to date: {summary}\n\n"
+            "Extend the summary taking into account the new messages above:"
+        )
+    
+    else:
+        summary_message = "Create a summary of the conversation above:"
+    
+    messages = state["messages"] + [HumanMessage(content=summary_message)]
+    
+    response = llm.invoke(messages)
+    
+    delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-2]]
+    
+    return {"summary": response.content, "messages": delete_messages}
 
-graph = builder.compile()
+
+def should_continue(state: State):
+    messages = state["messages"]
+    
+    if len(messages) > 6:
+        return "summarize_conversation"
+    
+
+    return END
 
 
+workflow = StateGraph(MessagesState)
 
+workflow.add_node("conversation", call_model)
+workflow.add_node("summarize_conversation", summarize_conversation)
 
+workflow.add_edge(START, "conversation")
+workflow.add_conditional_edges("conversation", should_continue, {
+        "summarize_conversation": "summarize_conversation",
+        END: END
+    })
+workflow.add_edge("summarize_conversation", "conversation")
+
+memory = MemorySaver()
+
+# graph = workflow.compile(checkpointer=memory)
+graph = workflow.compile()
+ 
+ 

@@ -29,6 +29,8 @@ langchain-ollama
 langchain-core
 langchain-huggingface
 langgraph
+langgraph-cli[inmem]
+
 
 
 faiss-cpu
