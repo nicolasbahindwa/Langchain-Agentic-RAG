@@ -1,4 +1,3 @@
-
 from typing_extensions import TypedDict
 import random
 from typing import Literal, Annotated
@@ -96,25 +95,37 @@ builder.add_conditional_edges(
 builder.add_edge("tools", "assistant")
 
 # react graph
-graph = builder.compile(interrupt_before=["assistant"], checkpointer=memory)
+graph = builder.compile(interrupt_after=["tools"], checkpointer=memory)
 
 
-initial_input = {"messages": "Multiply 5 and 6"}
+initial_input = {"messages": [HumanMessage(content="Multiply 2 and 9 divide by 3")]}
 
-thread = {"configurable": {"thread_id": "3"}}
+# thread = {"configurable": {"thread_id": "1"}}
+
+# for event in graph.stream(initial_input, thread, stream_mode="values"):
+#     pprint(event["messages"][-1])
+
+
+# state = graph.get_state(thread)
+
+# print(state.next)
+
+
+# for event in graph.stream(None, thread, stream_mode="values"):
+#     pprint(event["messages"][-1])
+    
+
+thread = {"configurable": {"thread_id":"333"}}
 
 for event in graph.stream(initial_input, thread, stream_mode="values"):
     pprint(event["messages"][-1])
 
-state = graph.get_state(thread)
-pprint(state)
+user_approval = input("Do you want to call the tools/ (yes/no)")
 
-# edit thread 
-graph.update_state(
-    thread,
-    {"messages": [HumanMessage(content="no, actually multiply 3 and 9")]}
-)
+if user_approval.lower() == "yes":
+    
+    for event in graph.stream(None, thread, stream_mode="values"):
+        print(event["messages"][-1])
 
-new_state = graph.get_state(thread).values
-for m in new_state["messages"]:
-    pprint(m)
+else:
+    print("operation cancelled by user")

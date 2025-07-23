@@ -30,7 +30,8 @@ langchain-core
 langchain-huggingface
 langgraph
 langgraph-cli[inmem]
-
+langgraph-checkpoint-sqlite
+aiosqlite
 
 
 faiss-cpu
