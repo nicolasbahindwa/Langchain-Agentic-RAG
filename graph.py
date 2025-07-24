@@ -11,7 +11,10 @@ from core.llm_manager import LLMManager, LLMProvider
 from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt import tools_condition
 from langgraph.checkpoint.memory import MemorySaver
-
+from langgraph.errors import NodeInterrupt
+import operator
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_community.document_loaders import WikipediaLoader
 
 
 # class MessageState(MessagesState):
@@ -22,39 +25,6 @@ from langgraph.checkpoint.memory import MemorySaver
 
 manager = LLMManager()
 
- 
-
-def multiply(a:int, b:int)-> int:
-    """ Multiply a and b.
-    
-    Args:
-        a: first int
-        b: second int
-    """
-    return a * b
-
-def add(a:int, b:int)-> int:
-    """ Add a and b
-    
-    Args:
-        a: first int
-        b: second int
-    """
-    return a + b
-
-def divide(a:int, b:int)-> float:
-    """Devide a and b
-    
-    Args: 
-        a: first int
-        b: second int
-    """
-    return a / b
-
-
-tools = [add, multiply, divide]
-
-
 llm = manager.get_chat_model(
     provider=LLMProvider.ANTHROPIC,
     model="claude-3-haiku-20240307",
@@ -63,58 +33,66 @@ llm = manager.get_chat_model(
      
 )
 
-
-llm_with_tools = llm.bind_tools(tools=tools)
-
-sys_msg = SystemMessage(content="You are a helpful assistant taked with performing arithmetics on a set of inputs.")
-
-# nodes
-def assistant (state:MessagesState):
-    return {"messages": [llm_with_tools.invoke([sys_msg] + state["messages"])]}
+class State(TypedDict):
+    question: str
+    answer: str
+    context: Annotated[list, operator.add]
 
 
-def should_continue(state: MessagesState) -> str:
-    """Determine whether to continue to tools or end."""
-    last_msg = state["messages"][-1]
-    if isinstance(last_msg, AIMessage) and last_msg.tool_calls:
-        return "tools"
-    return "end"
+def search_web(state):
+    """Retrieve docs from web search"""
+    tavily_search = TavilySearchResults(max_result=3)
+    search_docs = tavily_search.invoke(state["question"])
+    
+    formatted_search_docs = "\n\n ---\n\n".join(
+        [
+            f'<Document href="{doc["url"]}">\n{doc["content"]}\n</Document>'
+            for doc in search_docs
+        ]
+    )
+    return {"context": [formatted_search_docs]}
+
+def search_wikipedia(state):
+    """Retrieve docs from wikipedia"""
+    
+    search_docs = WikipediaLoader(query=state["question"], load_max_docs=2).load()
+    
+    formatted_search_docs = "\n\n ---\n\n".join([
+        f' <Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}">\n{doc.page_content}\n</Document>'
+        for doc in search_docs
+    ])
+    
+    return {"context": [formatted_search_docs]}
 
 
-memory = MemorySaver()
-builder = StateGraph(MessagesState)
+def generate_answer(state):
+    """Node to answer a question"""
+    
+    # get state
+    context = state["context"]
+    question = state["question"]
+    
+    # tempplate
+    answer_template = """Answer the question {question} using this context: {context} """
+    answer_instructions = answer_template.format(question=question, context=context)
+    
+    
+    # answer
+    answer = llm.invoke([SystemMessage(content=answer_instructions)] + [HumanMessage(content=f"answer the question.")])
+    
+    return {"answer": answer}
 
-builder.add_node("assistant", assistant)
-builder.add_node("tools", ToolNode(tools))
+builder = StateGraph(State)
 
-builder.add_edge(START, "assistant")
-builder.add_conditional_edges(
-    "assistant",
-    should_continue,
-    {"tools": "tools", "end": END}
-)
-builder.add_edge("tools", "assistant")
+builder.add_node("search_web", search_web)
+builder.add_node("search_wikipedia", search_wikipedia)
+builder.add_node("generate_answer", generate_answer)
 
-# react graph
-graph = builder.compile(interrupt_before=["assistant"], checkpointer=memory)
+# flow
+builder.add_edge(START, "search_wikipedia")
+builder.add_edge(START, "search_web")
+builder.add_edge("search_wikipedia", "generate_answer")
+builder.add_edge("search_web", "generate_answer")
+builder.add_edge("generate_answer", END)
 
-
-initial_input = {"messages": "Multiply 5 and 6"}
-
-thread = {"configurable": {"thread_id": "3"}}
-
-for event in graph.stream(initial_input, thread, stream_mode="values"):
-    pprint(event["messages"][-1])
-
-state = graph.get_state(thread)
-pprint(state)
-
-# edit thread 
-graph.update_state(
-    thread,
-    {"messages": [HumanMessage(content="no, actually multiply 3 and 9")]}
-)
-
-new_state = graph.get_state(thread).values
-for m in new_state["messages"]:
-    pprint(m)
+graph = builder.compile()

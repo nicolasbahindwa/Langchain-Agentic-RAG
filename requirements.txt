@@ -33,6 +33,10 @@ langgraph-cli[inmem]
 langgraph-checkpoint-sqlite
 aiosqlite
 
+tavily-python
+wikipedia
+
+
 
 faiss-cpu
 sentence-transformers
