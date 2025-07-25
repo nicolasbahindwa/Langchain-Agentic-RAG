@@ -1,28 +1,26 @@
-
+ 
 from typing_extensions import TypedDict
 import random
-from typing import Literal, Annotated
+from typing import Literal, Annotated, List
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage
 from langgraph.graph.message import add_messages
 from langgraph.graph import MessagesState
 from pprint import pprint
 from core.llm_manager import LLMManager, LLMProvider
+from core.search_manager import SearchManager
 from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt import tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import NodeInterrupt
 import operator
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_community.document_loaders import WikipediaLoader
+from pydantic import BaseModel, Field
+from langgraph.types import Send
+
+ 
 
 
-# class MessageState(MessagesState):
-#     messages:Annotated[list[AnyMessage], add_messages]
-
-
-
-
+search_manager = SearchManager()
 manager = LLMManager()
 
 llm = manager.get_chat_model(
@@ -32,67 +30,106 @@ llm = manager.get_chat_model(
     max_tokens=256
      
 )
+ 
 
-class State(TypedDict):
-    question: str
-    answer: str
-    context: Annotated[list, operator.add]
-
-
-def search_web(state):
-    """Retrieve docs from web search"""
-    tavily_search = TavilySearchResults(max_result=3)
-    search_docs = tavily_search.invoke(state["question"])
-    
-    formatted_search_docs = "\n\n ---\n\n".join(
-        [
-            f'<Document href="{doc["url"]}">\n{doc["content"]}\n</Document>'
-            for doc in search_docs
-        ]
+class Analyst(BaseModel):
+    affiliation: str = Field(
+        description="Primary affiliation of the analyst."
     )
-    return {"context": [formatted_search_docs]}
+    name: str = Field(
+        description="Name of the analyst"
+    )
+    role: str = Field(
+        description="Role if the analyst in the context of the topic"
+    )
+    
+    description: str = Field(
+        description="Role of the analyst focus, concerns, and motives"
+    )
+    
+    @property
+    def persona(self)->str:
+        return f"Name: {self.name} \nRole: {self.role}\nAffilation: {self.affiliation}\nDescription:{self.description}\n"
+        
+    
+    
+    
 
-def search_wikipedia(state):
-    """Retrieve docs from wikipedia"""
-    
-    search_docs = WikipediaLoader(query=state["question"], load_max_docs=2).load()
-    
-    formatted_search_docs = "\n\n ---\n\n".join([
-        f' <Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}">\n{doc.page_content}\n</Document>'
-        for doc in search_docs
-    ])
-    
-    return {"context": [formatted_search_docs]}
+class Perspectives(BaseModel):
+    analysts: List[Analyst] = Field(
+            description="Comprehension list of analysts with their roles and affiliations."
+        )
+
+class GenerateAnalystsState(TypedDict):
+    topic: str
+    max_analysts: int
+    human_analyst_feedback: str
+    analysts: List[Analyst]
 
 
-def generate_answer(state):
-    """Node to answer a question"""
-    
-    # get state
-    context = state["context"]
-    question = state["question"]
-    
-    # tempplate
-    answer_template = """Answer the question {question} using this context: {context} """
-    answer_instructions = answer_template.format(question=question, context=context)
-    
-    
-    # answer
-    answer = llm.invoke([SystemMessage(content=answer_instructions)] + [HumanMessage(content=f"answer the question.")])
-    
-    return {"answer": answer}
 
-builder = StateGraph(State)
+analyst_instructions = """You are tasked with creating a set of AI analyst personas. Follow these instructions carefully:
 
-builder.add_node("search_web", search_web)
-builder.add_node("search_wikipedia", search_wikipedia)
-builder.add_node("generate_answer", generate_answer)
+1. First, review the research topic:
+{topic}
+        
+2. Examine any editorial feedback that has been optionally provided to guide creation of the analysts: 
+        
+{human_analyst_feedback}
+    
+3. Determine the most interesting themes based upon documents and / or feedback above.
+                    
+4. Pick the top {max_analysts} themes.
 
-# flow
-builder.add_edge(START, "search_wikipedia")
-builder.add_edge(START, "search_web")
-builder.add_edge("search_wikipedia", "generate_answer")
-builder.add_edge("search_web", "generate_answer")
-builder.add_edge("generate_answer", END)
+5. Assign one analyst to each theme."""
 
-graph = builder.compile()
+
+# nodes
+
+def create_analysts(state:GenerateAnalystsState):
+    """ Create analysts """
+    topic = state['topic']
+    max_analysts = state["max_analysts"]
+    human_analyst_feedback= state.get("human_analyst_feedback")
+    
+    # efforce structured output
+    structured_llm = llm.with_structured_output(Perspectives)
+    
+    # system message
+    system_message = analyst_instructions.format(topic=topic, 
+                                                 human_analyst_feedback=human_analyst_feedback,
+                                                 max_analysts=max_analysts)
+    
+    # generate question
+    analysts = structured_llm.invoke([SystemMessage(content=system_message)] + [HumanMessage(content="Generate the set analysts. ")])
+    
+    # write the list of analysis to state
+    return {"analysts": analysts.analysts}
+
+
+def human_feedback(state: GenerateAnalystsState):
+    """ No-op node that should be interrupted on """
+    pass
+
+
+def should_continue(state: GenerateAnalystsState):
+    """ Return the next node to execute """
+    human_analyst_feedback=state.get("human_analyst_feedback", None)
+    if human_analyst_feedback:
+        return "create_analysts"
+    
+    # otherwise
+    END
+
+
+# Add nodes and edges 
+builder = StateGraph(GenerateAnalystsState)
+builder.add_node("create_analysts", create_analysts)
+builder.add_node("human_feedback", human_feedback)
+builder.add_edge(START, "create_analysts")
+builder.add_edge("create_analysts", "human_feedback")
+builder.add_conditional_edges("human_feedback", should_continue, ["create_analysts", END])
+
+# Compile
+memory = MemorySaver()
+graph = builder.compile(interrupt_before=['human_feedback'], checkpointer=memory)

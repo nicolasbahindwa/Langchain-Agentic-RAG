@@ -792,6 +792,7 @@ class APIKeysConfig:
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     langsmith_api_key: Optional[str] = None
+    tavily_api_key: Optional[str] = None
     aws_access_key_id: Optional[str] = None
     aws_secret_access_key: Optional[str] = None
     aws_region: Optional[str] = None
@@ -1017,6 +1018,7 @@ class Config:
             openai_api_key=os.getenv('OPENAI_API_KEY'),
             anthropic_api_key=os.getenv('ANTHROPIC_API_KEY'),
             langsmith_api_key=os.getenv('LANGSMITH_API_KEY'),
+            tavily_api_key = os.getenv("TAVILY_API_KEY"),
             aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
             aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
             aws_region=os.getenv('AWS_REGION', 'us-east-1')
@@ -1152,21 +1154,6 @@ class Config:
         except Exception as e:
             return {'status': 'error', 'message': str(e)}
         
-    
-    def get_service_status(self) -> Dict[str, bool]:
-        """Get status of all services"""
-        return {
-            'database': self.database.is_configured(),
-            'redis': self.redis.is_configured(),
-            'email': self.email.is_configured(),
-            'data_processing': self.data_processing.is_configured(), 
-            'ollama': self.ollama.is_configured(),
-            'vector_store': self.vector_store.is_configured(),  # Add this
-            'rag': self.rag.is_configured(),                    # Add this
-            'openai': bool(self.api_keys.openai_api_key),
-            'anthropic': bool(self.api_keys.anthropic_api_key),
-            'aws': bool(self.api_keys.aws_access_key_id and self.api_keys.aws_secret_access_key)
-        }
         
     def get_rag_vector_store_config(self):
         """Get vector store config in the format expected by EnhancedVectorStore"""

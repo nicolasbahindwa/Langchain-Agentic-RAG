@@ -33,6 +33,7 @@ langgraph-cli[inmem]
 langgraph-checkpoint-sqlite
 aiosqlite
 
+langchain-tavily
 tavily-python
 wikipedia
 
