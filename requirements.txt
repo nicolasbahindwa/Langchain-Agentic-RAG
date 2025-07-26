@@ -38,6 +38,9 @@ tavily-python
 wikipedia
 
 
+ipython
+
+
 
 faiss-cpu
 sentence-transformers

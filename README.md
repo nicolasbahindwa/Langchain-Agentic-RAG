@@ -32,3 +32,6 @@ Agentic-RAG is a retrieval-augmented generation (RAG) framework powered by **Lan
 
 ## 🗂️ Project Structure
  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+
+ 
