@@ -10,6 +10,7 @@ from langchain_community.document_loaders import WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from core.llm_manager import LLMManager, LLMProvider
+from urllib.error import HTTPError, URLError
 
 
 
@@ -49,10 +50,23 @@ COLLECTION_NAME = "askibm_2024"
 
 documents = []
 
-for url in list(URLS_DICTIONARY.values()):
-    loader = WebBaseLoader(url)
-    data = loader.load()
-    documents += data
+# for url in list(URLS_DICTIONARY.values()):
+#     loader = WebBaseLoader(url)
+#     data = loader.load()
+#     documents += data
+
+for url_name , url in URLS_DICTIONARY.items():
+    try:
+        loader = WebBaseLoader(url)
+        data = loader.load()
+        for doc in data:
+            # clean content 
+            doc.page_content = " ".join(doc.page_content.split())
+            doc.metadata["source_id"] = url_name
+        documents.extend(data)
+    except (HTTPError, URLError) as e:
+        print(f" Failed to load {url}: {str(e)}")
+
 
 documents[0].page_content
 
