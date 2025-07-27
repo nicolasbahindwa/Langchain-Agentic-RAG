@@ -31,11 +31,14 @@ langchain-huggingface
 langgraph
 langgraph-cli[inmem]
 langgraph-checkpoint-sqlite
+langchain_chroma
 aiosqlite
 
 langchain-tavily
 tavily-python
 wikipedia
+duckduckgo-search
+ddgs
 
 
 ipython
@@ -46,3 +49,5 @@ faiss-cpu
 sentence-transformers
 
 markitdown[all]
+
+beautifulsoup4
