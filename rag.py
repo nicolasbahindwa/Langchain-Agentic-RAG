@@ -144,6 +144,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from core.llm_manager import LLMManager, LLMProvider
 from urllib.error import HTTPError, URLError
+import traceback
 
 # State definition
 class RAGState(TypedDict):
@@ -153,35 +154,14 @@ class RAGState(TypedDict):
     context: str
     answer: str
     error: str
+    vectorstore: object  # Add this to make it explicit
 
 # Initialize components
 manager = LLMManager()
 URLS_DICTIONARY = {
-    "ufc_ibm_partnership": "https://newsroom.ibm.com/2024-11-14-ufc-names-ibm-as-first-ever-official-ai-partner",
-    "granite.html": "https://www.ibm.com/granite",
-    "products_watsonx_ai.html": "https://www.ibm.com/products/watsonx-ai",
-    "products_watsonx_ai_foundation_models.html": "https://www.ibm.com/products/watsonx-ai/foundation-models",
-    "watsonx_pricing.html": "https://www.ibm.com/watsonx/pricing",
-    "watsonx.html": "https://www.ibm.com/watsonx",
-    "products_watsonx_data.html": "https://www.ibm.com/products/watsonx-data",
-    "products_watsonx_assistant.html": "https://www.ibm.com/products/watsonx-assistant",
-    "products_watsonx_code_assistant.html": "https://www.ibm.com/products/watsonx-code-assistant",
-    "products_watsonx_orchestrate.html": "https://www.ibm.com/products/watsonx-orchestrate",
-    "products_watsonx_governance.html": "https://www.ibm.com/products/watsonx-governance",
-    "granite_code_models_open_source.html": "https://research.ibm.com/blog/granite-code-models-open-source",
-    "red_hat_enterprise_linux_ai.html": "https://www.redhat.com/en/about/press-releases/red-hat-delivers-accessible-open-source-generative-ai-innovation-red-hat-enterprise-linux-ai",
-    "model_choice.html": "https://www.ibm.com/blog/announcement/enterprise-grade-model-choices/",
-    "democratizing.html": "https://www.ibm.com/blog/announcement/democratizing-large-language-model-development-with-instructlab-support-in-watsonx-ai/",
-    "ibm_consulting_expands_ai.html": "https://newsroom.ibm.com/Blog-IBM-Consulting-Expands-Capabilities-to-Help-Enterprises-Scale-AI",
-    "ibm_data_product_hub.html": "https://www.ibm.com/products/data-product-hub",
-    "ibm_price_performance_data.html": "https://www.ibm.com/blog/announcement/delivering-superior-price-performance-and-enhanced-data-management-for-ai-with-ibm-watsonx-data/",
-    "ibm_bi_adoption.html": "https://www.ibm.com/blog/a-new-era-in-bi-overcoming-low-adoption-to-make-smart-decisions-accessible-for-all/",
-    "code_assistant_for_java.html": "https://www.ibm.com/blog/announcement/watsonx-code-assistant-java/",
-    "accelerating_gen_ai.html": "https://newsroom.ibm.com/Blog-How-IBM-Cloud-is-Accelerating-Business-Outcomes-with-Gen-AI",
-    "watsonx_open_source.html": "https://newsroom.ibm.com/2024-05-21-IBM-Unveils-Next-Chapter-of-watsonx-with-Open-Source,-Product-Ecosystem-Innovations-to-Drive-Enterprise-AI-at-Scale",
-    "ibm_concert.html": "https://www.ibm.com/products/concert",
-    "ibm_consulting_advantage_news.html": "https://newsroom.ibm.com/2024-01-17-IBM-Introduces-IBM-Consulting-Advantage,-an-AI-Services-Platform-and-Library-of-Assistants-to-Empower-Consultants",
-    "ibm_consulting_advantage_info.html": "https://www.ibm.com/consulting/info/ibm-consulting-advantage"
+    "tomato_plantation": "https://www.almanac.com/plant/tomatoes",
+    "how_to_grow_tomatoes": "https://eos.com/blog/how-to-grow-tomatoes/",
+    "crops_management_guide":"https://eos.com/crop-management-guide/tomato-growth-stages/"
 }
 
 COLLECTION_NAME = "askibm_2024"
@@ -203,86 +183,182 @@ llm = manager.get_chat_model(
     max_tokens=1500
 )
 
-# Node functions
+# Node functions with improved error handling
 def load_documents(state: RAGState) -> RAGState:
     """Load documents from URLs"""
     print("Loading documents...")
     documents = []
     
-    for url_name, url in URLS_DICTIONARY.items():
-        try:
-            loader = WebBaseLoader(url)
-            data = loader.load()
-            for doc in data:
-                # Clean content
-                doc.page_content = " ".join(doc.page_content.split())
-                doc.metadata["source_id"] = url_name
-            documents.extend(data)
-        except (HTTPError, URLError) as e:
-            print(f"Failed to load {url}: {str(e)}")
+    try:
+        for url_name, url in URLS_DICTIONARY.items():
+            try:
+                loader = WebBaseLoader(url)
+                data = loader.load()
+                for doc in data:
+                    # Clean content
+                    doc.page_content = " ".join(doc.page_content.split())
+                    doc.metadata["source_id"] = url_name
+                documents.extend(data)
+                print(f"Successfully loaded {url_name}")
+            except (HTTPError, URLError) as e:
+                print(f"Failed to load {url}: {str(e)}")
+                state["error"] = f"Failed to load {url}: {str(e)}"
+        
+        state["documents"] = documents
+        print(f"Loaded {len(documents)} documents total")
+        
+    except Exception as e:
+        error_msg = f"Error in load_documents: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        state["error"] = error_msg
     
-    state["documents"] = documents
-    print(f"Loaded {len(documents)} documents")
     return state
 
 def chunk_documents(state: RAGState) -> RAGState:
     """Split documents into chunks"""
     print("Chunking documents...")
-    documents = state["documents"]
     
-    # Clean documents
-    for doc in documents:
-        doc.page_content = " ".join(doc.page_content.split())
+    try:
+        documents = state.get("documents", [])
+        if not documents:
+            error_msg = "No documents found to chunk"
+            print(error_msg)
+            state["error"] = error_msg
+            return state
+        
+        # Clean documents
+        for doc in documents:
+            doc.page_content = " ".join(doc.page_content.split())
+        
+        # Split documents
+        chunks = text_splitter.split_documents(documents)
+        state["chunks"] = chunks
+        print(f"Created {len(chunks)} chunks")
+        
+    except Exception as e:
+        error_msg = f"Error in chunk_documents: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        state["error"] = error_msg
     
-    # Split documents
-    chunks = text_splitter.split_documents(documents)
-    state["chunks"] = chunks
-    print(f"Created {len(chunks)} chunks")
     return state
 
 def create_vectorstore(state: RAGState) -> RAGState:
     """Create vector store from chunks"""
     print("Creating vector store...")
-    chunks = state["chunks"]
     
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embedding_model,
-        collection_name=COLLECTION_NAME,
-        persist_directory=PERSIST_DIRECTORY
-    )
+    try:
+        chunks = state.get("chunks", [])
+        if not chunks:
+            error_msg = "No chunks found to create vectorstore"
+            print(error_msg)
+            state["error"] = error_msg
+            return state
+        
+        print(f"Creating vectorstore from {len(chunks)} chunks...")
+        
+        # Create vectorstore
+        vectorstore = Chroma.from_documents(
+            documents=chunks,
+            embedding=embedding_model,
+            collection_name=COLLECTION_NAME,
+            persist_directory=PERSIST_DIRECTORY
+        )
+        
+        # Explicitly set in state
+        state["vectorstore"] = vectorstore
+        print(f"✅ Vector store created successfully with {len(chunks)} embeddings")
+        print(f"✅ Vectorstore added to state: {vectorstore is not None}")
+        
+        # Verify it's actually in the state
+        if "vectorstore" not in state:
+            error_msg = "Failed to add vectorstore to state"
+            print(error_msg)
+            state["error"] = error_msg
+        
+    except Exception as e:
+        error_msg = f"Error in create_vectorstore: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        state["error"] = error_msg
     
-    state["vectorstore"] = vectorstore
-    print(f"Vector store created with {len(chunks)} embeddings")
     return state
 
 def retrieve_context(state: RAGState) -> RAGState:
     """Retrieve relevant context for the question"""
     print("Retrieving context...")
-    question = state["question"]
-    vectorstore = state["vectorstore"]
     
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-    docs = retriever.invoke(question)
+    try:
+        # Check if vectorstore exists
+        if "vectorstore" not in state:
+            error_msg = "Vectorstore not found in state. Available keys: " + str(list(state.keys()))
+            print(error_msg)
+            state["error"] = error_msg
+            return state
+        
+        question = state.get("question", "")
+        if not question:
+            error_msg = "No question provided"
+            print(error_msg)
+            state["error"] = error_msg
+            return state
+        
+        vectorstore = state["vectorstore"]
+        if vectorstore is None:
+            error_msg = "Vectorstore is None"
+            print(error_msg)
+            state["error"] = error_msg
+            return state
+        
+        print(f"Retrieving context for question: {question}")
+        
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+        docs = retriever.invoke(question)
+        
+        context = "\n\n".join([d.page_content for d in docs])
+        state["context"] = context
+        print(f"✅ Retrieved {len(docs)} relevant documents")
+        
+    except Exception as e:
+        error_msg = f"Error in retrieve_context: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        state["error"] = error_msg
     
-    context = "\n\n".join([d.page_content for d in docs])
-    state["context"] = context
-    print(f"Retrieved {len(docs)} relevant documents")
     return state
 
 def generate_answer(state: RAGState) -> RAGState:
     """Generate answer using LLM"""
     print("Generating answer...")
-    question = state["question"]
-    context = state["context"]
     
-    # Create chain
-    chain = prompt | llm | StrOutputParser()
+    try:
+        # Check for errors first
+        if state.get("error"):
+            print(f"Previous error detected: {state['error']}")
+            state["answer"] = f"Error occurred during processing: {state['error']}"
+            return state
+        
+        question = state.get("question", "")
+        context = state.get("context", "")
+        
+        if not context:
+            error_msg = "No context available to generate answer"
+            print(error_msg)
+            state["error"] = error_msg
+            state["answer"] = error_msg
+            return state
+        
+        # Create chain
+        chain = prompt | llm | StrOutputParser()
+        
+        # Generate response
+        response = chain.invoke({"context": context, "question": question})
+        state["answer"] = response
+        print("✅ Answer generated successfully")
+        
+    except Exception as e:
+        error_msg = f"Error in generate_answer: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        state["error"] = error_msg
+        state["answer"] = error_msg
     
-    # Generate response
-    response = chain.invoke({"context": context, "question": question})
-    state["answer"] = response
-    print("Answer generated")
     return state
 
 # Create the graph
@@ -306,31 +382,45 @@ workflow.add_edge("generate_answer", END)
 # Compile the graph
 app = workflow.compile()
 
-# Usage example
-if __name__ == "__main__":
-    # Initialize state
-    initial_state = {
-        "question": "Tell me about the UFC announcement from November 14, 2024",
-        "documents": [],
-        "chunks": [],
-        "context": "",
-        "answer": "",
-        "error": ""
-    }
+# # Usage example
+# if __name__ == "__main__":
+#     # Initialize state with all required keys
+#     initial_state = {
+#         "question": "How do you grow tomatoes successfully?",  # Changed to match your URLs
+#         "documents": [],
+#         "chunks": [],
+#         "context": "",
+#         "answer": "",
+#         "error": "",
+#         "vectorstore": None  # Initialize explicitly
+#     }
     
-    # Run the graph
-    print("Starting RAG pipeline...")
-    result = app.invoke(initial_state)
+#     # Run the graph
+#     print("Starting RAG pipeline...")
+#     print("="*50)
     
-    print("\n" + "="*50)
-    print("FINAL ANSWER:")
-    print("="*50)
-    print(result["answer"])
-    
-    # Optional: Visualize the graph
-    try:
-        from IPython.display import Image, display
-        display(Image(app.get_graph().draw_mermaid_png()))
-    except:
-        print("\nGraph structure:")
-        print("load_documents -> chunk_documents -> create_vectorstore -> retrieve_context -> generate_answer")
+#     try:
+#         result = app.invoke(initial_state)
+        
+#         print("\n" + "="*50)
+#         print("PIPELINE RESULTS:")
+#         print("="*50)
+        
+#         if result.get("error"):
+#             print(f"❌ ERROR: {result['error']}")
+#         else:
+#             print("✅ Pipeline completed successfully!")
+        
+#         print(f"\nDocuments loaded: {len(result.get('documents', []))}")
+#         print(f"Chunks created: {len(result.get('chunks', []))}")
+#         print(f"Vectorstore created: {'vectorstore' in result and result['vectorstore'] is not None}")
+#         print(f"Context retrieved: {bool(result.get('context'))}")
+        
+#         print("\n" + "="*50)
+#         print("FINAL ANSWER:")
+#         print("="*50)
+#         print(result.get("answer", "No answer generated"))
+        
+#     except Exception as e:
+#         print(f"❌ Pipeline failed with error: {str(e)}")
+#         print(f"Traceback: {traceback.format_exc()}")
