@@ -1,7 +1,7 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-        "lawyer": "./rag.py:app"
+        "lawyer": "./graph.py:app"
     },
     "env": ".env",
     "python_version": "3.11",

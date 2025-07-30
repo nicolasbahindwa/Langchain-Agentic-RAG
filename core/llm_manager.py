@@ -5,7 +5,8 @@ from typing import Dict, Any, Optional, List
 from langchain_core.language_models import BaseChatModel
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
-from langchain_community.chat_models import ChatOllama
+# from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from utils.logger import get_enhanced_logger
 
 class LLMProvider(str, Enum):
