@@ -319,3 +319,30 @@ async def search(
 
 
     return {}
+
+
+async def main():
+    urls = [
+        "https://www.almanac.com/plant/tomatoes",
+        
+    ]
+    user_agent = "Mozilla/5.0 (compatible; MyBot/1.0; +http://mybot.com/bot)"
+    
+    # Call fetch with your URLs, user agent, and optional parameters
+    documents = await fetch(
+        url_paths=urls,
+        user_agent=user_agent,
+        recursive=False,  # set True if you want recursive crawling
+        depth=2,          # max depth for recursive crawling
+        load_js=True,     # whether to use JS-enabled loaders like Playwright
+        use_playwright=True,
+        use_selenium=False
+    )
+    
+    for i, doc in enumerate(documents):
+        print(f"Document {i + 1} content snippet:")
+        print(doc.page_content[:500])  
+        print("-" * 80)
+
+# Run the async main function
+asyncio.run(main())

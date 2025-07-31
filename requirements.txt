@@ -41,6 +41,8 @@ duckduckgo-search
 ddgs
 
 
+ 
+
 ipython
 
 
@@ -49,5 +51,9 @@ faiss-cpu
 sentence-transformers
 
 markitdown[all]
+unstructured[all-docs]
 
 beautifulsoup4
+playwright 
+selenium
+chromium
