@@ -287,7 +287,7 @@ class WebCrawlerManager:
             timeout=DEFAULT_TIMEOUT
         )
     
-    async def _load_with_webbase(self, urls: List[str], user_agent: str) -> List[Document]:
+    async def _load_with_webb6ase(self, urls: List[str], user_agent: str) -> List[Document]:
         """Load URLs using WebBase loader"""
         headers = {
             "User-Agent": user_agent,

@@ -33,6 +33,13 @@ langgraph-cli[inmem]
 langgraph-checkpoint-sqlite
 langchain_chroma
 aiosqlite
+qdrant-client
+pypdf
+unstructured
+
+pandas
+numpy
+lark
 
 langchain-tavily
 tavily-python
