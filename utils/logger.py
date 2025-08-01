@@ -71,36 +71,6 @@ def create_console_handler() -> logging.Handler:
     return console_handler
 
 
-# def create_file_handler(app_name: str) -> logging.Handler:
-#     """Create and return a rotating file handler based on config."""
-#     log_dir = config.logging.log_dir
-#     Path(log_dir).mkdir(parents=True, exist_ok=True)
-#     log_file_path = Path(log_dir) / f"{app_name}.log"
-
-#     # Explicitly convert to int
-#     try:
-#         max_bytes = int(getattr(config.logging, "log_rotation_max_bytes", 10 * 1024 * 1024))
-#         backup_count = int(getattr(config.logging, "log_rotation_backup_count", 5))
-#     except ValueError as e:
-#         raise ValueError(f"Invalid log rotation config values: {e}")
-
-#     file_handler = RotatingFileHandler(
-#         filename=log_file_path,
-#         maxBytes=max_bytes,
-#         backupCount=backup_count
-#     )
-
-#     format_type = config.logging.format_type.lower()
-#     formats = {
-#         "simple": "%(asctime)s - %(levelname)s - %(message)s",
-#         "detailed": "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
-#         "json": '{"time": "%(asctime)s", "level": "%(levelname)s", "msg": "%(message)s"}'
-#     }
-#     # File handler uses regular formatter (no colors in files)
-#     formatter = logging.Formatter(formats.get(format_type, formats["simple"]))
-#     file_handler.setFormatter(formatter)
-
-#     return file_handler
 
 def create_file_handler(app_name: str) -> logging.Handler:
     """Create and return a rotating file handler based on config."""

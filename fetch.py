@@ -341,7 +341,7 @@ async def main():
     
     for i, doc in enumerate(documents):
         print(f"Document {i + 1} content snippet:")
-        print(doc.page_content[:500])  
+        print(doc.page_content[:500])  # print first 500 chars
         print("-" * 80)
 
 # Run the async main function

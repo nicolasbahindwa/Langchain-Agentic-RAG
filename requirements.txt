@@ -45,7 +45,7 @@ ddgs
 
 ipython
 
-
+watchdog
 
 faiss-cpu
 sentence-transformers
