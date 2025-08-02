@@ -10,8 +10,9 @@ from pathlib import Path
 from document_processor import DocumentProcessor
 from vector_store import VectorStoreManager, SelfQueryRetrieverManager
 from file_monitor import FileMonitor
+from utils.logger import get_enhanced_logger
 
-logger = logging.getLogger(__name__)
+logger = get_enhanced_logger("pipeline orchestratir")
 
 
 class DataExtractionPipeline:

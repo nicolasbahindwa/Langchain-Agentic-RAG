@@ -1,0 +1,72 @@
+def main():
+    """Enhanced example with evaluation"""
+    logging.basicConfig(level=logging.INFO)
+    
+    # Configuration
+    config = VectorStoreConfig(
+        chunk_size=800,
+        chunk_overlap=150,
+        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        device="cpu",
+        similarity_threshold=0.6
+    )
+    
+    # Sample document
+    sample_document = """
+# Machine Learning Fundamentals
+
+## Introduction
+Machine learning is revolutionizing how we process and understand data.
+
+## Supervised Learning
+Uses labeled data to train predictive models.
+
+### Classification
+Predicts discrete categories or classes.
+
+### Regression
+Predicts continuous numerical values.
+
+## Unsupervised Learning
+Finds patterns in unlabeled data.
+
+### Clustering
+Groups similar data points together.
+
+### Dimensionality Reduction
+Reduces the number of features while preserving information.
+    """
+    
+    # Process document
+    splitter = SmartTextSplitter(config)
+    documents = splitter.split_by_sections(sample_document, "sample_doc.md")
+    
+    # Create vector store
+    vector_store = EnhancedVectorStore(config)
+    vector_store.process_documents(documents)
+    
+    # Test queries for evaluation
+    test_queries = [
+        {
+            'query': 'What is supervised learning?',
+            'relevant_docs': ['sample_doc.md']
+        },
+        {
+            'query': 'How does clustering work?',
+            'relevant_docs': ['sample_doc.md']
+        }
+    ]
+    
+    # Evaluate performance
+    metrics = vector_store.evaluate_retrieval(test_queries)
+    print("Evaluation Metrics:", metrics)
+    
+    # Get statistics
+    stats = vector_store.get_store_statistics()
+    print("Store Statistics:", stats)
+    
+    # Save store
+    vector_store.save_store("vector_store_data")
+
+if __name__ == "__main__":
+    main()

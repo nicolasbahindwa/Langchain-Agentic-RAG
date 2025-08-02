@@ -37,9 +37,7 @@ qdrant-client
 pypdf
 unstructured
 
-pandas
-numpy
-lark
+ 
 
 langchain-tavily
 tavily-python
