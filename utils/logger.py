@@ -1,4 +1,5 @@
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from core.config import config  # Assume this exposes a fully populated config object
@@ -49,8 +50,25 @@ class ColoredFormatter(logging.Formatter):
 
 
 def create_console_handler() -> logging.Handler:
-    """Create and return a colored console handler."""
-    console_handler = logging.StreamHandler()
+    """Create and return a colored console handler with proper Unicode support."""
+    
+    # Create a StreamHandler with explicit UTF-8 encoding for Windows
+    if sys.platform.startswith('win'):
+        # For Windows, try to use UTF-8 encoding
+        try:
+            import io
+            console_handler = logging.StreamHandler(
+                stream=io.TextIOWrapper(
+                    sys.stdout.buffer, 
+                    encoding='utf-8', 
+                    errors='replace'
+                )
+            )
+        except (AttributeError, OSError):
+            # Fallback to regular StreamHandler
+            console_handler = logging.StreamHandler()
+    else:
+        console_handler = logging.StreamHandler()
     
     # Check if colors should be enabled
     use_colors = getattr(config.logging, 'use_colors', True)
@@ -69,7 +87,6 @@ def create_console_handler() -> logging.Handler:
     console_handler.setFormatter(formatter)
     
     return console_handler
-
 
 
 def create_file_handler(app_name: str) -> logging.Handler:
@@ -100,7 +117,8 @@ def create_file_handler(app_name: str) -> logging.Handler:
     file_handler = RotatingFileHandler(
         filename=log_file_path,
         maxBytes=max_bytes,
-        backupCount=backup_count
+        backupCount=backup_count,
+        encoding='utf-8'  # Ensure UTF-8 encoding for file handler
     )
 
     format_type = config.logging.format_type.lower()
@@ -161,40 +179,79 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-# Enhanced logger with emoji support
+# Enhanced logger with emoji support and fallback for encoding issues
 class EnhancedLogger:
     """Wrapper around logger with enhanced methods for better visual output."""
     
     def __init__(self, name: str):
         self.logger = get_logger(name)
+        # Check if we can safely use emojis
+        self.use_emojis = self._can_use_emojis()
+    
+    def _can_use_emojis(self) -> bool:
+        """Check if the current environment can handle emoji characters."""
+        try:
+            # Try to encode a test emoji
+            test_emoji = "✅"
+            if sys.platform.startswith('win'):
+                # On Windows, check if we can encode to the console's encoding
+                test_emoji.encode(sys.stdout.encoding or 'utf-8')
+            return True
+        except (UnicodeEncodeError, AttributeError):
+            return False
+    
+    def _format_message(self, emoji: str, msg: str) -> str:
+        """Format message with emoji if supported, otherwise use text prefix."""
+        if self.use_emojis:
+            return f"{emoji} {msg}"
+        else:
+            # Fallback text representations
+            emoji_map = {
+                "✅": "[SUCCESS]",
+                "❌": "[FAILURE]",
+                "⚠️": "[WARNING]",
+                "ℹ️": "[INFO]",
+                "🐛": "[DEBUG]",
+                "🚀": "[PERFORMANCE]",
+                "🛡️": "[SECURITY]"
+            }
+            prefix = emoji_map.get(emoji, "[LOG]")
+            return f"{prefix} {msg}"
     
     def success(self, msg: str, *args, **kwargs):
         """Log a success message with a checkmark."""
-        self.logger.info(f"✅ {msg}", *args, **kwargs)
+        formatted_msg = self._format_message("✅", msg)
+        self.logger.info(formatted_msg, *args, **kwargs)
     
     def failure(self, msg: str, *args, **kwargs):
         """Log a failure message with an X mark."""
-        self.logger.error(f"❌ {msg}", *args, **kwargs)
+        formatted_msg = self._format_message("❌", msg)
+        self.logger.error(formatted_msg, *args, **kwargs)
     
     def warning(self, msg: str, *args, **kwargs):
         """Log a warning with a warning emoji."""
-        self.logger.warning(f"⚠️  {msg}", *args, **kwargs)
+        formatted_msg = self._format_message("⚠️", msg)
+        self.logger.warning(formatted_msg, *args, **kwargs)
     
     def info(self, msg: str, *args, **kwargs):
         """Log an info message with an info emoji."""
-        self.logger.info(f"ℹ️  {msg}", *args, **kwargs)
+        formatted_msg = self._format_message("ℹ️", msg)
+        self.logger.info(formatted_msg, *args, **kwargs)
     
     def debug(self, msg: str, *args, **kwargs):
         """Log a debug message with a bug emoji."""
-        self.logger.debug(f"🐛 {msg}", *args, **kwargs)
+        formatted_msg = self._format_message("🐛", msg)
+        self.logger.debug(formatted_msg, *args, **kwargs)
     
     def performance(self, msg: str, *args, **kwargs):
         """Log performance metrics with a rocket emoji."""
-        self.logger.info(f"🚀 {msg}", *args, **kwargs)
+        formatted_msg = self._format_message("🚀", msg)
+        self.logger.info(formatted_msg, *args, **kwargs)
     
     def security(self, msg: str, *args, **kwargs):
         """Log security-related messages with a shield emoji."""
-        self.logger.warning(f"🛡️  {msg}", *args, **kwargs)
+        formatted_msg = self._format_message("🛡️", msg)
+        self.logger.warning(formatted_msg, *args, **kwargs)
 
 
 def get_enhanced_logger(name: str) -> EnhancedLogger:

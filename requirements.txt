@@ -36,7 +36,8 @@ aiosqlite
 qdrant-client
 pypdf
 unstructured
-
+qdrant-client
+langchain-qdrant
  
 
 langchain-tavily
