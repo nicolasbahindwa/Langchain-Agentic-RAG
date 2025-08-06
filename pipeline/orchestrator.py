@@ -1,65 +1,47 @@
-"""
-Complete data extraction pipeline orchestrator integrating file monitoring,
-document processing, and vector store management
-"""
+
 import logging
-import json
-from typing import List, Set
+import time
+from typing import List, Set, Optional
 from pathlib import Path
 from .monitor import FileMonitor
 from .processor import DocumentProcessor
-from .vector_store import VectorStoreManager, get_recommended_model
-from utils.logger import get_enhanced_logger
+from .vector_store import VectorStoreManager
+
+logger = logging.getLogger(__name__)
+
 
 class DataExtractionPipeline:
-    """Complete pipeline with file monitoring, processing and vector store integration"""
+    """Simplified pipeline with reliable ID-based file deletion"""
     
     def __init__(self, 
                  watch_paths: List[str],
                  chunk_size: int = 1000,
                  chunk_overlap: int = 200,
-                 embedding_model: str = get_recommended_model("multilingual"),
+                 embedding_model: str = "BAAI/bge-small-en-v1.5",
                  collection_name: str = "document_chunks",
                  persist_dir: str = "./qdrant_storage"):
         """
-        Initialize complete data pipeline
+        Initialize data pipeline with ID-based deletion support
         
         Args:
             watch_paths: Directories to monitor for changes
             chunk_size: Text chunk size for processing
             chunk_overlap: Overlap between chunks
-            embedding_model: OpenAI embedding model
+            embedding_model: HuggingFace embedding model
             collection_name: Qdrant collection name
             persist_dir: Vector store persistence directory
         """
-        self.watch_paths = watch_paths
+        self.watch_paths = [Path(p) for p in watch_paths]
         
-        # Initialize enhanced logger
-        self.logger = get_enhanced_logger("orchestrator")
-        
-        # Track processed files to avoid duplicates
-        self.processed_files: Set[str] = set()
-        
-        # Initialize document processor
-        self.processor = DocumentProcessor(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap
+        # Initialize components
+        self.processor = DocumentProcessor(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        self.vector_store = VectorStoreManager(
+            embedding_model=embedding_model,
+            collection_name=collection_name,
+            persist_dir=persist_dir
         )
-        self.logger.success("Document processor initialized")
         
-        # Initialize vector store manager
-        try:
-            self.vector_store = VectorStoreManager(
-                embedding_model=embedding_model,
-                collection_name=collection_name,
-                persist_dir=persist_dir
-            )
-            self.logger.success("Vector store manager initialized")
-        except Exception as e:
-            self.logger.failure(f"Vector store initialization failed: {str(e)}")
-            raise
-        
-        # Initialize file monitor with event handlers
+        # Initialize file monitor
         self.file_monitor = FileMonitor(
             watch_paths=watch_paths,
             on_file_created=self._handle_file_created,
@@ -67,218 +49,201 @@ class DataExtractionPipeline:
             on_file_deleted=self._handle_file_deleted
         )
         
-        self.logger.success(f"Pipeline initialized for paths: {', '.join(watch_paths)}")
+        logger.info(f"Pipeline initialized with ID-based deletion for paths: {', '.join(watch_paths)}")
         
-        # Process existing files on startup
+        # Process existing files
         self._process_existing_files()
     
-    def _process_existing_files(self):
+    def _process_existing_files(self) -> None:
         """Process all existing supported files in watch directories"""
-        self.logger.info("Processing existing files in watch directories...")
+        logger.info("Processing existing files...")
         
-        total_processed = 0
+        processed_count = 0
         for watch_path in self.watch_paths:
-            path = Path(watch_path)
-            if not path.exists():
-                self.logger.warning(f"Watch path does not exist: {watch_path}")
+            if not watch_path.exists():
+                logger.warning(f"Watch path does not exist: {watch_path}")
                 continue
                 
-            for file_path in path.rglob('*'):
-                if file_path.is_file() and self.processor.is_supported_file(file_path):
-                    # Skip metadata files
-                    if file_path.name == "metadata.json":
-                        self.logger.info(f"Skipping metadata file: {file_path}")
-                        continue
-                        
-                    if self._process_file(str(file_path)):
-                        total_processed += 1
+            for file_path in watch_path.rglob('*'):
+                if file_path.is_file() and self._should_process_file(file_path):
+                    if self._process_file(file_path):
+                        processed_count += 1
         
-        self.logger.success(f"Processed {total_processed} existing files on startup")
+        logger.info(f"Processed {processed_count} existing files")
     
-    def _process_file(self, file_path: str) -> bool:
+    def _should_process_file(self, file_path: Path) -> bool:
+        """Check if file should be processed"""
+        # Skip metadata files and unsupported files
+        if file_path.name == "metadata.json":
+            return False
+        
+        return self.processor.is_supported_file(str(file_path))
+    
+    def _process_file(self, file_path: Path, force: bool = False) -> bool:
         """
-        Process a single file: load, chunk, and add to vector store
+        Process a single file: load, chunk, and add to vector store with ID tracking
         
         Args:
             file_path: Path to file to process
+            force: Force processing even if already processed
             
         Returns:
             True if processing successful, False otherwise
         """
         try:
-            # Check if file is supported
-            if not self.processor.is_supported_file(file_path):
-                self.logger.info(f"Skipping unsupported file: {file_path}")
-                return False
+            file_path_str = str(file_path)
             
-            # Get file hash for deduplication
-            file_hash = self.processor.get_file_hash(file_path)
-            if file_hash in self.processed_files:
-                self.logger.info(f"File already processed: {file_path}")
+            # Check if already processed (unless forced)
+            if not force and self.vector_store.is_file_processed(file_path_str):
+                logger.debug(f"File already processed: {file_path}")
                 return False
             
             # Process the file
-            self.logger.info(f"Processing file: {file_path}")
-            chunks = self.processor.process_file(file_path)
+            logger.info(f"Processing file: {file_path}")
+            chunks = self.processor.process_file(file_path_str)
             
             if not chunks:
-                self.logger.warning(f"No chunks generated for: {file_path}")
+                logger.warning(f"No chunks generated for: {file_path}")
                 return False
             
-            # Add to vector store
+            # Add to vector store with ID tracking
             self.vector_store.add_documents(chunks)
-            
-            # Track as processed
-            self.processed_files.add(file_hash)
-            
-            self.logger.success(f"Successfully processed {len(chunks)} chunks from: {file_path}")
+            logger.info(f"Successfully processed {len(chunks)} chunks from: {file_path}")
             return True
             
         except Exception as e:
-            self.logger.failure(f"File processing failed for {file_path}: {str(e)}")
+            logger.error(f"Failed to process file {file_path}: {e}")
             return False
     
-    def _remove_file_from_store(self, file_path: str):
-        """
-        Remove file's documents from vector store
+    def _handle_file_created(self, file_path: str) -> None:
+        """Handle new file creation"""
+        logger.info(f"New file detected: {file_path}")
         
-        Args:
-            file_path: Path to deleted file
-        """
+        file_path_obj = Path(file_path)
+        if self._should_process_file(file_path_obj):
+            # Small delay to ensure file is fully written
+            time.sleep(0.1)
+            self._process_file(file_path_obj)
+    
+    def _handle_file_modified(self, file_path: str) -> None:
+        """Handle file modification with reliable ID-based deletion and reprocessing"""
+        logger.info(f"File modified: {file_path}")
+        
+        file_path_obj = Path(file_path)
+        if not self._should_process_file(file_path_obj):
+            return
+        
         try:
-            # Create filter to remove documents from this file
-            filter_conditions = {
-                "must": [
-                    {
-                        "key": "source",
-                        "match": {"value": str(file_path)}
-                    }
-                ]
-            }
+            # Remove old version using ID-based deletion
+            logger.info(f"Removing old version of modified file: {file_path}")
+            removal_success = self.vector_store.remove_file(file_path)
             
-            self.vector_store.delete_documents(filter_conditions)
-            self.logger.success(f"Removed documents from vector store for: {file_path}")
+            if removal_success:
+                logger.info(f"Successfully removed old version: {file_path}")
+            else:
+                logger.warning(f"Could not remove old version (may not exist): {file_path}")
+            
+            # Wait a moment for file system operations to complete
+            time.sleep(0.1)
+            
+            # Reprocess the file with new content
+            logger.info(f"Reprocessing modified file: {file_path}")
+            if self._process_file(file_path_obj, force=True):
+                logger.info(f"Successfully reprocessed modified file: {file_path}")
+            else:
+                logger.error(f"Failed to reprocess modified file: {file_path}")
             
         except Exception as e:
-            self.logger.failure(f"Failed to remove documents for {file_path}: {str(e)}")
+            logger.error(f"Error handling file modification for {file_path}: {e}")
     
-    # File event handlers
-    def _handle_file_created(self, file_path: str):
-        """Handle new file creation"""
-        self.logger.success(f"NEW FILE DETECTED: {file_path}")
-        
-        # Skip metadata files
-        if Path(file_path).name == "metadata.json":
-            self.logger.info(f"Skipping metadata file: {file_path}")
-            return
-            
-        # Process the new file
-        if self._process_file(file_path):
-            self.logger.performance(f"New file processed and indexed: {file_path}")
-        else:
-            self.logger.warning(f"Failed to process new file: {file_path}")
-    
-    def _handle_file_modified(self, file_path: str):
-        """Handle file modification"""
-        # Skip metadata files
-        if Path(file_path).name == "metadata.json":
-            return
-            
-        self.logger.info(f"FILE MODIFIED: {file_path}")
+    def _handle_file_deleted(self, file_path: str) -> None:
+        """Handle file deletion with reliable ID-based removal"""
+        logger.info(f"File deleted: {file_path}")
         
         try:
-            # Remove old version
-            self._remove_file_from_store(file_path)
+            # Use ID-based deletion for reliable removal
+            removal_success = self.vector_store.remove_file(file_path)
             
-            # Process updated version
-            if self._process_file(file_path):
-                self.logger.performance(f"Modified file reprocessed: {file_path}")
+            if removal_success:
+                logger.info(f"Successfully removed all data for deleted file: {file_path}")
             else:
-                self.logger.warning(f"Failed to reprocess modified file: {file_path}")
+                logger.warning(f"Could not remove data for deleted file (may not exist): {file_path}")
                 
         except Exception as e:
-            self.logger.failure(f"Error handling file modification for {file_path}: {str(e)}")
+            logger.error(f"Error removing deleted file {file_path}: {e}")
     
-    def _handle_file_deleted(self, file_path: str):
-        """Handle file deletion"""
-        # Skip metadata files
-        if Path(file_path).name == "metadata.json":
-            return
-            
-        self.logger.warning(f"FILE DELETED: {file_path}")
-        
-        # Remove from vector store
-        self._remove_file_from_store(file_path)
-        
-        self.logger.info(f"Cleanup completed for deleted file: {file_path}")
-    
-    def get_pipeline_stats(self) -> dict:
-        """Get statistics about the pipeline state"""
-        try:
-            vector_stats = self.vector_store.get_collection_info()
-            return {
-                "processed_files_count": len(self.processed_files),
-                "watch_paths": self.watch_paths,
-                "vector_store_stats": vector_stats,
-                "is_monitoring": self.file_monitor.is_monitoring
-            }
-        except Exception as e:
-            self.logger.failure(f"Failed to get pipeline stats: {str(e)}")
-            return {"error": str(e)}
-    
-    def query_documents(self, query: str, k: int = 5, filters: dict = None):
-        """
-        Query the vector store for relevant documents
-        
-        Args:
-            query: Search query
-            k: Number of results to return
-            filters: Optional Qdrant filters
-            
-        Returns:
-            List of relevant document chunks
-        """
-        self.logger.info(f"Querying documents with: '{query}' (k={k})")
-        
-        try:
-            results = self.vector_store.query_documents(query=query, k=k, filters=filters)
-            self.logger.success(f"Query returned {len(results)} results")
-            return results
-        except Exception as e:
-            self.logger.failure(f"Query failed: {str(e)}")
-            return []
-    
-    def start_monitoring(self):
+    def start_monitoring(self) -> None:
         """Start file monitoring"""
-        self.logger.performance("STARTING FILE MONITORING")
-        try:
-            self.file_monitor.start_monitoring()
-            stats = self.get_pipeline_stats()
-            self.logger.info(f"Pipeline stats: {stats}")
-        except Exception as e:
-            self.logger.failure(f"Failed to start monitoring: {str(e)}")
-            raise
+        logger.info("Starting file monitoring with ID-based deletion...")
+        self.file_monitor.start_monitoring()
     
-    def stop_monitoring(self):
+    def stop_monitoring(self) -> None:
         """Stop file monitoring"""
-        self.logger.performance("STOPPING FILE MONITORING")
-        try:
-            self.file_monitor.stop_monitoring()
-        except Exception as e:
-            self.logger.failure(f"Failed to stop monitoring: {str(e)}")
+        logger.info("Stopping file monitoring...")
+        self.file_monitor.stop_monitoring()
     
-    def run_forever(self):
-        """Main execution loop"""
+    def process_file_manually(self, file_path: str, force: bool = False) -> bool:
+        """Manually process a specific file"""
+        return self._process_file(Path(file_path), force=force)
+    
+    def remove_file_manually(self, file_path: str) -> bool:
+        """Manually remove a specific file using ID-based deletion"""
         try:
-            self.start_monitoring()
-            self.logger.info("Monitoring files... (Press Ctrl+C to stop)")
-            self.logger.info("Pipeline is ready for queries and file changes")
-            self.file_monitor.run_forever()
-        except KeyboardInterrupt:
-            self.logger.warning("Keyboard interrupt received")
+            return self.vector_store.remove_file(file_path)
         except Exception as e:
-            self.logger.failure(f"Critical error in pipeline: {str(e)}")
-            raise
-        finally:
-            self.stop_monitoring()
-            self.logger.success("Pipeline shutdown complete")
+            logger.error(f"Failed to manually remove file {file_path}: {e}")
+            return False
+    
+    def get_stats(self) -> dict:
+        """Get pipeline statistics including ID tracking info"""
+        stats = {
+            'watch_paths': [str(p) for p in self.watch_paths],
+            'vector_store_stats': self.vector_store.get_stats()
+        }
+        
+        # Add ID-based deletion info
+        vector_stats = stats['vector_store_stats']
+        if 'tracked_vectors' in vector_stats:
+            stats['id_based_deletion'] = {
+                'enabled': True,
+                'tracked_vectors': vector_stats['tracked_vectors'],
+                'deletion_method': 'ID-based with filter fallback'
+            }
+        
+        return stats
+    
+    def health_check(self) -> bool:
+        """Perform health check of pipeline components"""
+        try:
+            # Check vector store (includes ID tracking verification)
+            if not self.vector_store.health_check():
+                return False
+            
+            # Check processor
+            if not hasattr(self.processor, 'is_supported_file'):
+                return False
+            
+            # Check watch paths exist
+            missing_paths = [p for p in self.watch_paths if not p.exists()]
+            if missing_paths:
+                logger.warning(f"Missing watch paths: {missing_paths}")
+            
+            # Verify ID tracking is working
+            stats = self.vector_store.get_stats()
+            if 'tracked_vectors' not in stats:
+                logger.warning("ID tracking may not be working properly")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return False
+    
+    def cleanup_orphaned_data(self) -> int:
+        """Clean up orphaned data from database and vector store"""
+        try:
+            return self.vector_store.cleanup_orphaned_records()
+        except Exception as e:
+            logger.error(f"Failed to cleanup orphaned data: {e}")
+            return 0
+
