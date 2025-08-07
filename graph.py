@@ -5,12 +5,10 @@ from typing_extensions import TypedDict
 from typing import Literal, List
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.errors import NodeInterrupt
+ 
 from langchain_core.documents import Document 
 from pydantic import BaseModel, Field
 from langgraph.types import Send
-from langchain_core.messages import get_buffer_string
 from IPython.display import Markdown
 import operator
 
@@ -18,7 +16,10 @@ import operator
 from core.llm_manager import LLMManager, LLMProvider
 from core.search_manager import SearchManager
 from pipeline.vector_store import VectorStoreManager
-from pipeline.orchestrator import DataExtractionPipeline
+
+ 
+from utils.logger import get_enhanced_logger   
+ 
 
 # ------------------------------------------------------------------
 # 2. Utilities & Constants
@@ -27,7 +28,7 @@ search_manager = SearchManager()
 manager = LLMManager()
 
 vector_store = VectorStoreManager(
-    embedding_model='BAAI/bge-small-en-v1.5',
+    embedding_model='paraphrase-multilingual-MiniLM-L12-v2',
     collection_name="document_knowledge_base",
     persist_dir="./vector_storage"
 )
@@ -41,6 +42,25 @@ llm = manager.get_chat_model(
 
 llm_light = manager.get_chat_model(provider=LLMProvider.OLLAMA)
 
+logger = get_enhanced_logger("rag_graph")
+
+def safe_node(func):
+    """Decorator that catches any Exception and logs via the utils logger."""
+    def _wrapper(state: RagState) -> RagState:
+        try:
+            return func(state)
+        except Exception as ex:
+            logger.failure(f"Node {func.__name__} failed: {ex}")
+            lang_hint = get_language_protocol()
+            err_msg = (
+                f"{lang_hint}\n\n"
+                f"⚠️ System Error (node `{func.__name__}`)\n"
+                f"{str(ex)}"
+            )
+            state.setdefault("messages", []).append(AIMessage(content=err_msg))
+            state["error"] = str(ex)
+            return state
+    return _wrapper
 def get_language_protocol() -> str:
     """
     Universal Language Protocol for all LLM interactions.
@@ -71,6 +91,7 @@ Explicit Language Respect:
 - Maintain consistent terminology in the chosen language
 - Use culturally appropriate formatting for numbers, dates, and currency
 """
+ 
 
 # ------------------------------------------------------------------
 # 3. State Definition
@@ -91,6 +112,7 @@ class RagState(TypedDict):
 # ------------------------------------------------------------------
 # 4. Node Functions 
 # ------------------------------------------------------------------
+@safe_node
 def question_rewrite(state: RagState) -> RagState:
     """Rewrite the question for better retrieval while respecting language."""
     language_protocol = get_language_protocol()
@@ -116,6 +138,7 @@ def question_rewrite(state: RagState) -> RagState:
     state["question"] = rewritten
     return state
 
+@safe_node
 def retrieve_context(state: RagState) -> RagState:
     """Retrieve relevant documents."""
     query = state["question"]
@@ -131,6 +154,7 @@ def retrieve_context(state: RagState) -> RagState:
     state["context"] = texts
     return state
 
+@safe_node
 def context_ranking(state: RagState) -> RagState:
     """Rank contexts by relevance."""
     language_protocol = get_language_protocol()
@@ -176,6 +200,7 @@ def context_ranking(state: RagState) -> RagState:
     state["context_scores"] = ranked_scores
     return state
 
+@safe_node
 def collect_user_feedback(state: RagState) -> RagState:
     """Ask the user for feedback if needed."""
     if not state["needs_feedback"]:
@@ -198,11 +223,13 @@ def collect_user_feedback(state: RagState) -> RagState:
         """
     for i, ctx in enumerate(top_ctx, 1):
         feedback_msg += f"\n\n**Excerpt {i}:** {ctx[:150]}..."
-
+    if "messages" not in state:
+        state["messages"] = []
     state["messages"].append(AIMessage(content=feedback_msg))
     state["feedback_cycle_count"] = state.get("feedback_cycle_count", 0) + 1
     return state
 
+@safe_node
 def process_feedback(state: RagState) -> RagState:
     """Process user feedback for the next cycle."""
     if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
@@ -210,6 +237,7 @@ def process_feedback(state: RagState) -> RagState:
         state["needs_feedback"] = False
     return state
 
+@safe_node
 def answer_generation(state: RagState) -> RagState:
     """Generate final answer while respecting language."""
     language_protocol = get_language_protocol()

@@ -1,5 +1,5 @@
 """
-Simplified usage example for the refactored DataExtractionPipeline
+example usage
 """
 import logging
 import threading
@@ -96,7 +96,17 @@ def interactive_query_loop(pipeline: DataExtractionPipeline):
             
             # Query the vector store
             logger.info(f"Searching for: '{query}'")
-            results = pipeline.vector_store.query_documents(query, k=3)
+            docs, scores = pipeline.vector_store.query_documents(
+                query=query,
+                k=5,
+                
+                search_type="hybrid",   # "vector", "keyword", "hybrid"
+                rerank=True,            # toggle re-ranking
+                diversity=True          # toggle MMR diversification
+            )
+            results = docs
+            print("========================================")
+            print(scores)
             
             if results:
                 print(f"\nFound {len(results)} relevant documents:")
@@ -203,7 +213,7 @@ def main():
         "watch_paths": ["./documents", "./data"],
         "chunk_size": 800,
         "chunk_overlap": 100,
-        "embedding_model": "BAAI/bge-small-en-v1.5",  # Use HuggingFace model
+        "embedding_model": "paraphrase-multilingual-MiniLM-L12-v2",  # Use HuggingFace model
         "collection_name": "document_knowledge_base",
         "persist_dir": "./vector_storage"
     }
