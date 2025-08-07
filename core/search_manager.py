@@ -19,7 +19,7 @@ except ImportError:
 
 from langchain_core.documents.base import Document
 from langchain_core.tools import BaseTool
-from config import config
+from .config import config
 
 
 @dataclass
