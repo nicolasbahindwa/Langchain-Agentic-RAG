@@ -7,6 +7,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import NodeInterrupt
+from langchain_core.documents import Document 
 from pydantic import BaseModel, Field
 from langgraph.types import Send
 from langchain_core.messages import get_buffer_string
@@ -119,9 +120,15 @@ def retrieve_context(state: RagState) -> RagState:
     """Retrieve relevant documents."""
     query = state["question"]
     k = 8 if state.get("needs_feedback") else 4
-    contexts = vector_store.query_documents(query, k=k)
-    filtered = [ctx for ctx in contexts if ctx and len(ctx) > 20]
-    state["context"] = filtered
+    docs: list[Document] = vector_store.query_documents(query, k=k)
+    # Extract the text and filter
+    texts = [
+        doc.page_content.strip()
+        for doc in docs
+        if doc.page_content and len(doc.page_content.strip()) > 20
+    ]
+
+    state["context"] = texts
     return state
 
 def context_ranking(state: RagState) -> RagState:
@@ -210,14 +217,16 @@ def answer_generation(state: RagState) -> RagState:
         f"SOURCE {i}:\n {ctx}"
         for i, ctx in enumerate(state["ranked_context"][:3], 1)
     )
+    if "messages" not in state:
+        state["messages"] = []
     prompt = [
         SystemMessage(content=f"""{language_protocol}
-Answer the question using ONLY the provided sources. Cite sources as [1][2]."""),
-        HumanMessage(content=(
-            f"Question: {state['original_question']}\n\n"
-            f"Relevant sources:\n{context_window}\n\n"
-            f"User feedback: {state.get('user_feedback', 'None')}"
-        ))
+        Answer the question using ONLY the provided sources. Cite sources as [1][2]."""),
+                HumanMessage(content=(
+                    f"Question: {state['original_question']}\n\n"
+                    f"Relevant sources:\n{context_window}\n\n"
+                    f"User feedback: {state.get('user_feedback', 'None')}"
+                ))
     ]
     response = llm.invoke(prompt)
     state["answer"] = response.content
