@@ -30,8 +30,8 @@ class VectorStoreManager:
 
     def __init__(self,
                  embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2",
-                 collection_name: str = "document_chunks",
-                 persist_dir: str = "./qdrant_storage",
+                 collection_name: str = "document_knowledge_base",
+                 persist_dir: str = "./vector_storage",
                  rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
         """Initialize Qdrant vector store manager"""
         self.embedding_model_name = embedding_model
@@ -63,7 +63,7 @@ class VectorStoreManager:
         logger.info(f"Collection '{collection_name}' ready for use")
 
     # ----------------------------------------------------------
-    # NEW METHODS (reranking support)
+    # reranking support
     # ----------------------------------------------------------
     def _init_reranker(self) -> Optional[CrossEncoder]:
         """Initialize cross-encoder for relevance ranking"""
@@ -618,7 +618,8 @@ class VectorStoreManager:
             # Corrected count method parameters
             search_result = self.client.count(
                 collection_name=self.collection_name,
-                filter=filter_condition  # Changed 'count_filter' to 'filter'
+                # Changed 'count_filter' to 'filter'
+                filter=filter_condition 
             )
 
             if search_result.count > 0:
@@ -659,7 +660,8 @@ class VectorStoreManager:
         query: str,
         k: int = 5,
         filters: Optional[Dict] = None,
-        search_type: str = "hybrid",  # "vector", "keyword", or "hybrid"
+        # "vector", "keyword", or "hybrid"
+        search_type: str = "hybrid",  
         rerank: bool = True,
         diversity: bool = True
     ) -> Tuple[List[Document], List[float]]:
@@ -684,7 +686,7 @@ class VectorStoreManager:
             # Stage 1: Initial retrieval (hybrid by default)
             candidates = self._retrieve_candidates(
                 query,
-                count=k * 5 if rerank else k,  # Get more candidates for reranking
+                count=k * 5 if rerank else k, 
                 filter=qdrant_filter,
                 search_type=search_type,
                 diversity=diversity
