@@ -30,7 +30,7 @@ class LLMManager:
             LLMProvider.OLLAMA: {
                 'enabled': config.ollama.is_configured(),
                 'base_url': config.ollama.base_url,
-                'default_model': 'mistral'
+                'default_model': 'llama3.1'
             },
             LLMProvider.ANTHROPIC: {
                 'enabled': bool(config.api_keys.anthropic_api_key),

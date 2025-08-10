@@ -1,36 +1,18 @@
-# ------------------------------------------------------------------
-# 1. Imports & Global Setup
-# ------------------------------------------------------------------
-from typing_extensions import TypedDict
-from typing import Literal, List
-from langgraph.graph import StateGraph, START, END
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage
- 
-from langchain_core.documents import Document 
-from pydantic import BaseModel, Field
-from langgraph.types import Send
-from IPython.display import Markdown
-import operator
-
-# Your project-specific imports
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 from core.llm_manager import LLMManager, LLMProvider
 from core.search_manager import SearchManager
 from pipeline.vector_store import VectorStoreManager
-from langgraph.types import interrupt
+from utils.logger import get_enhanced_logger
+from typing import TypedDict, List, Optional, Annotated, Literal
+from langchain_core.documents import Document
+from langchain.schema import Document
+from pydantic import BaseModel, Field
+import json
 
-
-from langgraph.checkpoint.memory import MemorySaver
-
-
- 
-from utils.logger import get_enhanced_logger   
- 
-
-# ------------------------------------------------------------------
-# 2. Utilities & Constants
-# ------------------------------------------------------------------
+# Initialize components
 search_manager = SearchManager()
-manager = LLMManager()
+llm_manager = LLMManager()
 
 vector_store = VectorStoreManager(
     embedding_model='paraphrase-multilingual-MiniLM-L12-v2',
@@ -40,34 +22,65 @@ vector_store = VectorStoreManager(
 
 memory = MemorySaver()
 
-llm = manager.get_chat_model(
+llm = llm_manager.get_chat_model(
     provider=LLMProvider.ANTHROPIC,
     model="claude-3-haiku-20240307",
     temperature=0.7,
     max_tokens=1500
 )
 
-llm_light = manager.get_chat_model(provider=LLMProvider.OLLAMA)
-
+llm_light = llm_manager.get_chat_model(provider=LLMProvider.OLLAMA)
 logger = get_enhanced_logger("rag_graph")
 
-def safe_node(func):
-    """Decorator that catches any Exception and logs via the utils logger."""
-    def _wrapper(state: RagState) -> RagState:
-        try:
-            return func(state)
-        except Exception as ex:
-            logger.failure(f"Node {func.__name__} failed: {ex}")
-            lang_hint = get_language_protocol()
-            err_msg = (
-                f"{lang_hint}\n\n"
-                f"⚠️ System Error (node `{func.__name__}`)\n"
-                f"{str(ex)}"
-            )
-            state.setdefault("messages", []).append(AIMessage(content=err_msg))
-            state["error"] = str(ex)
-            return state
-    return _wrapper
+
+
+
+# ===== 1. State Definition =====
+class RAGState(TypedDict):
+    """Workflow state container"""
+    original_question: Annotated[str, Field(description="User's original question")]
+    current_question: Annotated[str, Field(description="Current question version after rewrites")]
+    retrieved_docs: Annotated[List[Document], Field(description="Retrieved documents")]
+    ranked_docs: Annotated[List[Document], Field(description="Ranked and filtered best documents")]
+    context_sufficient: Annotated[bool, Field(False, description="Sufficiency flag")]
+    human_feedback: Annotated[Optional[str], Field(None, description="Human input")]
+    feedback_cycles: Annotated[int, Field(0, description="Feedback cycle count")]
+    structured_response: Annotated[Optional[dict], Field(None, description="Structured answer components")]
+    final_answer: Annotated[Optional[str], Field(None, description="Generated answer")]
+    error: Annotated[Optional[str], Field(None, description="Error message")]
+    # NEW: Field to store the AI's feedback request
+    ai_feedback_request: Annotated[Optional[str], Field(None, description="AI's feedback request message")]
+
+# ===== 2. Structured Output Models =====
+class ContextSufficiencyCheck(BaseModel):
+    sufficient: bool = Field(description="Context adequacy")
+    reasoning: str = Field(description="Sufficiency rationale")
+
+class QuestionRewriter(BaseModel):
+    rewritten_question: str = Field(description="Optimized question")
+    reasoning: str = Field(description="Rewriting rationale")
+
+class DocumentRelevanceScore(BaseModel):
+    document_index: int = Field(description="Index of the document in the list")
+    relevance_score: float = Field(description="Relevance score from 0.0 to 1.0", ge=0.0, le=1.0)
+    reasoning: str = Field(description="Why this document is relevant/irrelevant")
+
+class DocumentRanking(BaseModel):
+    rankings: List[DocumentRelevanceScore] = Field(description="List of document rankings")
+    selected_count: int = Field(description="Number of top documents to select", ge=1, le=10)
+
+class StructuredAnswer(BaseModel):
+    main_answer: str = Field(description="Direct, concise answer to the question")
+    explanation: str = Field(description="Detailed explanation of the answer")
+    key_points: list[str] = Field(description="Key supporting points")
+    examples: list[str] = Field(description="Relevant examples or use cases")
+    additional_context: str | None = Field(None, description="Extra context")
+    confidence_level: Literal["high", "medium", "low"]
+
+class DocumentRankingLLMResponse(BaseModel):
+    ordered_indices: List[int] = Field(description="List of document indices")
+
+
 def get_language_protocol() -> str:
     """
     Universal Language Protocol for all LLM interactions.
@@ -98,431 +111,360 @@ def get_language_protocol() -> str:
     - Maintain consistent terminology in the chosen language
     - Use culturally appropriate formatting for numbers, dates, and currency
     """
+
+# ===== 3. Node Implementations =====
  
+def rewrite_question_node(state: RAGState) -> RAGState:
+    original = state["original_question"].strip()
+    feedback = state.get("human_feedback", "").strip()
 
-# ------------------------------------------------------------------
-# 3. State Definition
-# ------------------------------------------------------------------
-class RagState(TypedDict):
-    messages: List[AnyMessage]
-    question: str
-    original_question: str
-    answer: str
-    context: List[str]
-    ranked_context: List[str]
-    context_scores: List[float]
-    process_cycle_count: int
-    user_feedback: str
-    feedback_cycle_count: int
-    needs_feedback: bool
-
-# ------------------------------------------------------------------
-# 4. Node Functions 
-# ------------------------------------------------------------------
-@safe_node
-def question_rewrite(state: RagState) -> RagState:
-    """Rewrite the question for better retrieval while respecting language."""
-    language_protocol = get_language_protocol()
-    feedback = ""
-    messages  = state.get("messages", [])
-    if messages  and isinstance(messages[-1], HumanMessage):
-        feedback = messages[-1].content
-
-    sys_msg = f"""{language_protocol}
-        You are a query-optimization expert. Your task is to improve search queries while maintaining perfect language consistency.
-        TASK: Rewrite the user's question to make it more effective for document search while keeping the same language and meaning."""
-    
-    prompt_content = f"""Original question: "{state["original_question"]}"
-            write this question to make it more effective for document search while keeping the same language and meaning."""
-    if feedback:
-        prompt_content += f"\nUser feedback: {feedback}"
-
-    messages = [
-        SystemMessage(content=sys_msg),
-        HumanMessage(content=prompt_content)
-    ]
-    rewritten = llm.invoke(messages).content.strip()
-    state["question"] = rewritten
-    return state
-
-@safe_node
-def retrieve_context(state: RagState) -> RagState:
-    """Retrieve relevant documents with robust type handling."""
-    query = state["question"]
-    k = 8 if state.get("needs_feedback") else 4
-    
-    # Call query_documents which returns (documents, scores)
-    results = vector_store.query_documents(query, k=k)
-    
-    # Unpack the tuple properly
-    if isinstance(results, tuple) and len(results) == 2:
-        documents, scores = results
-        logger.debug(f"Vector store returned tuple: {len(documents)} docs, {len(scores)} scores")
-    elif isinstance(results, list):
-        # Fallback for backward compatibility
-        documents = results
-        scores = [1.0] * len(documents)
-        logger.warning("Vector store returned list instead of tuple, using default scores")
-    else:
-        logger.error(f"Unexpected return type from vector store: {type(results)}")
-        documents = []
-        scores = []
-    
-    # Handle nested lists and flatten if necessary
-    if documents and isinstance(documents[0], list):
-        documents = [item for sublist in documents for item in sublist]
-        logger.debug("Flattened nested document list")
-    
-    # Extract text content with safety checks
-    texts = []
-    for doc in documents:
-        try:
-            # Handle Document objects
-            if hasattr(doc, 'page_content'):
-                content = doc.page_content.strip()
-            elif isinstance(doc, dict) and 'page_content' in doc:
-                content = doc['page_content'].strip()
-            elif isinstance(doc, str):
-                content = doc.strip()
-            else:
-                logger.warning(f"Unknown document type: {type(doc)}")
-                continue
-                
-            if content and len(content) > 20:
-                texts.append(content)
-        except Exception as e:
-            logger.error(f"Error processing document: {e}")
-            continue
-
-    logger.info(f"Retrieved {len(texts)} valid contexts out of {len(documents)} documents")
-    state["context"] = texts
-    return state
-
-@safe_node
-def context_ranking(state: RagState) -> RagState:
-     
-    """Rank contexts by relevance with better low-quality detection."""
-    language_protocol = get_language_protocol()
-    question = state["question"]
-    contexts = state["context"]
-    
-    logger.info("=== CONTEXT RANKING DEBUG ===")
-    logger.info(f"Question: {question}")
-    logger.info(f"Number of contexts: {len(contexts)}")
-    
-    if not contexts:
-        logger.warning("No contexts retrieved, triggering feedback")
-        state["needs_feedback"] = True
-        state["ranked_context"] = []
-        state["context_scores"] = []
-        return state
-
-    scoring_prompt = f"""{language_protocol}
-        You are a strict relevance-evaluation expert. Analyze these contexts for their relevance to the question: "{question}"
-        
-        CRITICAL RULES:
-        - Score 1-3: Context is completely irrelevant, off-topic, or about different subjects
-        - Score 4-6: Context is somewhat related but doesn't contain specific information needed
-        - Score 7-9: Context is relevant but may be incomplete
-        - Score 10: Context directly answers the question
-        
-        EXAMPLES:
-        - Olympics question + legal documents = Score 1-2
-        - Olympics question + sports documents = Score 7-10
-        - Olympics question + general sports = Score 4-6
-        
-        Return ONLY comma-separated scores (e.g., "1.5, 8.0, 2.0")
-        
-        CONTEXTS TO SCORE:
-        """
-    
-    for i, ctx in enumerate(contexts, 1):
-        scoring_prompt += f"\n\n-- CONTEXT {i} --\n{ctx[:400]}..."
-
-    messages = [
-        SystemMessage(content=f"You are a strict relevance scoring specialist.\n{language_protocol}"),
-        HumanMessage(content=scoring_prompt)
-    ]
-    
     try:
-        response = llm.invoke(messages).content.strip()
-        logger.debug(f"Relevance scores: {response}")
+        if feedback:
+            # Combine original question with human feedback
+            combined_prompt = f"""
+You are a question refiner.
+
+{get_language_protocol()}
+
+Original question:
+{original}
+
+Human feedback:
+{feedback}
+
+Task: Rewrite the question to **incorporate** the feedback while **preserving** the original intent and language.
+Return ONLY the rewritten question.
+"""
+            response = llm_light.invoke(combined_prompt)
+            rewritten = response.content.strip()
+            logger.info(f"Question refined with feedback: '{original}' + feedback → '{rewritten}'")
+        else:
+            # No feedback, just optimize the original
+            prompt = f"""
+You are a question-optimiser.
+
+{get_language_protocol()}
+
+Original question:
+{original}
+
+Task: Make the question more specific **without changing its meaning** and **without adding any external facts**.
+Return ONLY the rewritten question.
+"""
+            response = llm_light.invoke(prompt)
+            rewritten = response.content.strip()
+            logger.info(f"Question rewritten (no feedback): '{original}' → '{rewritten}'")
+
+        return {"current_question": rewritten}
+    except Exception as e:
+        logger.failure(f"Question rewrite failed: {e}")
+        return {"error": f"Rewrite failed: {e}"}
+
+def retrieve_documents_node(state: RAGState) -> RAGState:
+    try:
+        # Get both documents and scores from the vector store
+        raw_docs, _ = vector_store.query_documents(state["current_question"])
         
-        # Parse scores more robustly
-        scores = []
-        for s in response.split(","):
-            try:
-                score = float(s.strip())
-                scores.append(max(0, min(10, score)))  # Clamp between 0-10
-            except ValueError:
-                scores.append(2.0)  # Default low score for parsing errors
+        # Convert to simple Document objects with just page_content
+        docs = []
+        for doc in raw_docs:
+            if isinstance(doc, Document):
+                # Create a new Document with only page_content
+                docs.append(Document(page_content=doc.page_content))
+            elif isinstance(doc, dict):
+                # Handle dictionary format
+                content = doc.get("page_content", doc.get("content", ""))
+                docs.append(Document(page_content=content))
+            else:
+                # Fallback to string conversion
+                docs.append(Document(page_content=str(doc)))
         
-        # Ensure we have scores for all contexts
-        while len(scores) < len(contexts):
-            scores.append(2.0)
+        logger.info(f"Retrieved {len(docs)} documents")
+        return {"retrieved_docs": docs}
+    except Exception as e:
+        logger.failure(f"Document retrieval failed: {str(e)}")
+        return {"error": f"Retrieval failed: {str(e)}"}
+
+
+def rank_and_select_documents_node(state: RAGState) -> RAGState:
+    docs = state.get("retrieved_docs", [])
+    if not docs:
+        return {"ranked_docs": []}
+
+    # Build preview (same as before)...
+    preview_parts = []
+    for idx, doc in enumerate(docs):
+        snippet = (doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content)
+        preview_parts.append(f"{idx}: {snippet}")
+    preview = "\n".join(preview_parts)
+
+    ranking_prompt = f"""
+    TASK: Return ONLY numbers separated by commas. No JSON, no explanations.
+
+    Question: "{state['current_question']}"
+
+    Documents:
+    {preview}
+
+    Return ONLY indices as: 3,0,1,2
+    """
+
+    try:
+        response = llm.invoke(ranking_prompt)
+        
+        # Simple list parsing
+        indices_str = response.content.strip()
+        indices = [int(x.strip()) for x in indices_str.split(',') if x.strip().isdigit()]
+        
+        # Validate indices
+        valid_indices = [idx for idx in indices if 0 <= idx < len(docs)]
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_indices = [idx for idx in valid_indices if not (idx in seen or seen.add(idx))]
+        
+        # Take top 5
+        selected_indices = unique_indices[:5]
+        ranked_docs = [docs[i] for i in selected_indices]
+        
+        return {"ranked_docs": ranked_docs}
         
     except Exception as e:
-        logger.error(f"Failed to parse scores: {e}, using length-based fallback")
-        scores = [max(1, min(10, len(ctx)/100)) for ctx in contexts]
-
-    # More aggressive low-quality detection
-    scored = sorted(zip(contexts, scores), key=lambda x: x[1], reverse=True)
-    ranked_contexts = [c for c, _ in scored]
-    ranked_scores = [s for _, s in scored]
-
-    # Trigger feedback if top score is low OR if average is very low
-    top_score = max(scores) if scores else 0
-    avg_score = sum(scores) / len(scores) if scores else 0
+        logger.error(f"Ranking failed: {e}")
+        # Fallback: use first 5 docs
+        return {"ranked_docs": docs[:5]}
     
-    logger.info(f"Context quality: top={top_score}, avg={avg_score}")
+def check_sufficiency_node(state: RAGState) -> RAGState:
+    """
+    Grade whether the retrieved docs *actually* answer the question.
+    Returns False if any required information is missing.
+    """
+    ranked_docs = state.get("ranked_docs", [])
+    if not ranked_docs:
+        return {"context_sufficient": False}
+
+    context = "\n\n".join(doc.page_content for doc in ranked_docs)
+    question = state["current_question"]
+
+    prompt = f"""You are an evaluator.
+
+    {get_language_protocol()}
+
+    Question: {question}
+
+    Retrieved context:
+    {context[:4000]}
+
+    Task: decide if the context **fully answers** the question.
+    Return JSON only:
+    {{"pass": true_or_false, "reason": "one-sentence reason"}}
+
+    Rules:
+    - If any key info is missing → pass=false
+    - If only partial or vague answer → pass=false
+    - If fully answered → pass=true
+    """
+    try:
+        response = llm.invoke(prompt)
+        result = json.loads(response.content)
+        sufficient = result.get("pass", False)
+        logger.info(f"Sufficiency check: {sufficient} – {result.get('reason','')}")
+        return {"context_sufficient": sufficient}
+    except Exception as e:
+        logger.warning(f"Sufficiency parsing failed: {e}; defaulting to False")
+        return {"context_sufficient": False}
+
+def request_feedback_node(state: RAGState) -> RAGState:
+    """Prepare for human input - store AI message separately"""
+    feedback_msg = f"""
+    The current context may not be sufficient to fully answer your question: "{state['current_question']}"
     
-    # Lower threshold to catch more cases
-    state["needs_feedback"] = top_score < 6.0 or avg_score < 4.0
+    Please provide additional clarification or specify what aspects you'd like me to focus on.
+    You can also ask me to search for more specific information.
+    """
     
-    # Special case: if all scores are very low, definitely ask for feedback
-    if all(score <= 3.0 for score in scores):
-        state["needs_feedback"] = True
-        
-    state["ranked_context"] = ranked_contexts
-    state["context_scores"] = ranked_scores
+    return {
+        "ai_feedback_request": feedback_msg,  # Store separately
+        "human_feedback": None,  # Reset human feedback
+        "feedback_cycles": state.get("feedback_cycles", 0) + 1
+    }
+
+def evaluate_feedback_node(state: RAGState) -> RAGState:
+    """Decide how to handle human feedback"""
+    feedback = state.get("human_feedback", "").lower()
     
-    logger.info(f"Feedback needed: {state['needs_feedback']}")
-    return state
-
- 
-
-@safe_node
-def collect_user_feedback(state: RagState) -> RagState:
-    """Ask the user for feedback if needed - with proper interrupt."""
-    if not state["needs_feedback"]:
-        return state
-
-    language_protocol = get_language_protocol()
-    question = state["original_question"]
+    # Check if human wants to proceed without changes
+    if any(keyword in feedback for keyword in ["proceed", "go ahead", "use what you have", "continue"]):
+        logger.info("Human instructed to proceed with current context")
+        return {"process_feedback": False}
     
-    feedback_msg = f"""{language_protocol}
-I searched for information about your question: **"{question}"** but couldn't find sufficiently relevant results.
+    # Default to processing feedback
+    logger.info("Processing human feedback for new retrieval")
+    return {"process_feedback": True}
 
-Could you please:
-- Clarify what specific information you're looking for?
-- Provide additional keywords or context?
-- Let me know if I'm misunderstanding your question?"""
+def structure_answer_node(state: RAGState) -> RAGState:
+    """
+    Build the final answer using ONLY the retrieved documents.
+    """
+    docs = state.get("ranked_docs", [])
+    context = "\n\n".join(doc.page_content for doc in docs) or "No documents retrieved."
+    question = state["current_question"]
 
-    # This will pause execution and wait for human input
-    feedback = interrupt({
-        "type": "human_feedback",
-        "question": question,
-        "message": feedback_msg
-    })
-    
-    # The feedback comes back as the return value from interrupt
-    state["user_feedback"] = str(feedback)
-    state["needs_feedback"] = False
-    state["feedback_cycle_count"] = state.get("feedback_cycle_count", 0) + 1
-    
-    return state
-
-
-@safe_node
-def process_feedback(state: RagState) -> RagState:
-    """Process user feedback for the next cycle."""
-    if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
-        state["user_feedback"] = state["messages"][-1].content
-        state["needs_feedback"] = False
-    return state
-
-@safe_node
-def answer_generation(state: RagState) -> RagState:
-    """Generate final answer while respecting language."""
-    language_protocol = get_language_protocol()
-    context_window = "\n\n".join(
-        f"SOURCE {i}:\n {ctx}"
-        for i, ctx in enumerate(state["ranked_context"][:3], 1)
+    system = (
+        "You are a precise assistant. "
+        "Use **only** the provided context. "
+        "Do not add external information, assumptions, or paraphrase beyond the text. "
+        "Return valid JSON matching the requested schema."
     )
-    if "messages" not in state:
-        state["messages"] = []
-    prompt = [
-        SystemMessage(content=f"""{language_protocol}
-        Answer the question using ONLY the provided sources. Cite sources as [1][2]."""),
-                HumanMessage(content=(
-                    f"Question: {state['original_question']}\n\n"
-                    f"Relevant sources:\n{context_window}\n\n"
-                    f"User feedback: {state.get('user_feedback', 'None')}"
-                ))
-    ]
-    response = llm.invoke(prompt)
-    state["answer"] = response.content
-    state["messages"].append(AIMessage(content=state["answer"]))
-    return state
 
-# ------------------------------------------------------------------
-# 5. Conditional Edges
-# ------------------------------------------------------------------
-def should_request_feedback(state: RagState) -> Literal["collect_user_feedback", "answer_generation"]:
-    """More nuanced feedback decision."""
-    needs_fb = state.get("needs_feedback", False)
-    feedback_cycles = state.get("feedback_cycle_count", 0)
-    
-    # Always request feedback if explicitly needed
-    if needs_fb and feedback_cycles < 3:
-        logger.info(f"Requesting feedback (cycle {feedback_cycles})")
-        return "collect_user_feedback"
-    
-    # If we've had feedback cycles and still need feedback, we might want to proceed
-    if feedback_cycles >= 3:
-        logger.warning("Max feedback cycles reached, proceeding to answer")
-        return "answer_generation"
-    
-    return "answer_generation"
+    prompt = f"""{get_language_protocol()}
 
-def should_retry_retrieval(state: RagState) -> Literal["question_rewrite", "answer_generation"]:
-    has_feedback = bool(state.get("user_feedback", "").strip())
-    under_limit = state.get("feedback_cycle_count", 0) < 3
-    return "question_rewrite" if has_feedback and under_limit else "answer_generation"
+    Question: {question}
 
+    Context:
+    {context}
 
-# ------------------------------------------------------------------
-# 6. Graph Construction - FIXED VERSION
-# ------------------------------------------------------------------
-graph = StateGraph(RagState)
+    Construct the answer using **only** the context above.  
+    If the context does not contain the answer, state that clearly.
 
-graph.add_node("question_rewrite", question_rewrite)
-graph.add_node("retrieve_context", retrieve_context)
-graph.add_node("context_ranking", context_ranking)
-graph.add_node("collect_user_feedback", collect_user_feedback)
-graph.add_node("process_feedback", process_feedback)
-graph.add_node("answer_generation", answer_generation)
-
-graph.set_entry_point("question_rewrite")
-graph.add_edge("question_rewrite", "retrieve_context")
-graph.add_edge("retrieve_context", "context_ranking")
-
-# FIXED: Add explicit edge for cases where feedback is NOT needed
-graph.add_conditional_edges(
-    "context_ranking",
-    should_request_feedback,
-    {
-        "collect_user_feedback": "collect_user_feedback",
-        "answer_generation": "answer_generation"
-    }
-)
-
-# This part is correct - feedback processing
-graph.add_edge("collect_user_feedback", "process_feedback")
-
-# FIXED: Ensure feedback processing can loop back to question rewrite
-graph.add_conditional_edges(
-    "process_feedback",
-    should_retry_retrieval,
-    {
-        "question_rewrite": "question_rewrite",
-        "answer_generation": "answer_generation"
-    }
-)
-
-graph.add_edge("answer_generation", END)
-
-compile_graph = graph.compile(interrupt_before=["collect_user_feedback"], checkpointer=memory)
-
-
-import uuid
-
-def run():
-    print("🤖 Welcome to the RAG CLI assistant.")
-    original_question = input("📝 Enter your question: ").strip()
-
-    if not original_question:
-        print("⚠️ Please enter a valid question.")
-        return
-
-    thread_id = f"cli-thread-{uuid.uuid4()}"
-
-    # Configuration for the compiled graph
-    config = {
-        "configurable": {
-            "thread_id": thread_id
-        }
-    }
-
-    # Initial state
-    initial_state = {
-        "original_question": original_question,
-        "question": original_question,
-        "messages": [HumanMessage(content=original_question)],
-        "context": [],
-        "ranked_context": [],
-        "context_scores": [],
-        "process_cycle_count": 0,
-        "user_feedback": "",
-        "feedback_cycle_count": 0,
-        "needs_feedback": False,
-    }
-
+    Return JSON with this schema:
+    {{
+    "main_answer": "<concise answer or 'Information not found in provided documents'>",
+    "explanation": "<detailed explanation strictly from context>",
+    "key_points": ["<point1>", "<point2>"],
+    "examples": ["<example from context>"],
+    "additional_context": "<extra info only if explicitly in context>",
+    "confidence_level": "high|medium|low"
+    }}
+    """
     try:
-        current_state = initial_state
-        max_attempts = 3
-        
-        for attempt in range(max_attempts):
-            print(f"\n🔍 Attempt {attempt + 1}...")
-            
-            # Run the graph
-            events = list(compile_graph.stream(current_state, config, stream_mode="updates"))
-            
-            # Check final state
-            final_state = compile_graph.get_state(config).values
-            
-            if final_state.get("answer") and not final_state.get("needs_feedback"):
-                print("\n✅ Answer:")
-                print(final_state["answer"])
-                return
-            
-            # Handle feedback request
-            if final_state.get("needs_feedback"):
-                feedback_msg = f"\nI searched for information about your question: **\"{final_state['original_question']}\"** but couldn't find sufficiently relevant results."
-                print(feedback_msg)
-                user_feedback = input("✍️  Your feedback: ").strip()
-                
-                if not user_feedback:
-                    print("❌ No feedback provided. Exiting.")
-                    return
-                
-                # Prepare next iteration state
-                current_state = {
-                    "original_question": final_state["original_question"],
-                    "question": final_state["question"],  # Will be rewritten by question_rewrite
-                    "messages": final_state["messages"] + [HumanMessage(content=user_feedback)],
-                    "context": [],
-                    "ranked_context": [],
-                    "context_scores": [],
-                    "process_cycle_count": final_state.get("process_cycle_count", 0) + 1,
-                    "user_feedback": user_feedback,
-                    "feedback_cycle_count": final_state.get("feedback_cycle_count", 0) + 1,
-                    "needs_feedback": False,  # Reset for next cycle
-                }
-                
-                # Force question rewrite with feedback
-                rewrite_prompt = [
-                    SystemMessage(content=get_language_protocol() + "\nYou are a query-optimization expert. Rewrite the question incorporating user feedback."),
-                    HumanMessage(content=f"Original question: {final_state['original_question']}\nUser feedback: {user_feedback}\nRewrite the question to be more effective for document search.")
-                ]
-                
-                rewritten = llm.invoke(rewrite_prompt).content.strip()
-                current_state["question"] = rewritten
-                print(f"🔄 Rewritten question: {rewritten}")
-                
-            else:
-                # No feedback needed, but no answer - exit
-                print("❌ Could not find relevant information.")
-                return
-        
-        print("❌ Max attempts reached. Please try a different question.")
-        
-    except KeyboardInterrupt:
-        print("\n\n👋 Goodbye!")
+        response = llm.invoke([{"role": "system", "content": system},
+                               {"role": "user", "content": prompt}])
+        structured_data = StructuredAnswer.model_validate_json(response.content)
+        return {"structured_response": structured_data.model_dump()}
     except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.warning(f"JSON extraction failed: {e}")
+        fallback = {
+            "main_answer": "Could not generate a structured answer from the retrieved documents.",
+            "explanation": context[:1000],
+            "key_points": [],
+            "examples": [],
+            "additional_context": None,
+            "confidence_level": "low"
+        }
+        return {"structured_response": fallback}
+
+def generate_answer_node(state: RAGState) -> RAGState:
+    data = state.get("structured_response", {})
+    if not data:
+        return {"final_answer": "Error: No structured response available."}
+
+    lines = []
+
+    if ans := data.get("main_answer"):
+        lines.append(f"**Answer:** {ans}")
+
+    if expl := data.get("explanation"):
+        lines.append(f"**Explanation:**\n{expl}")
+
+    if kps := data.get("key_points"):
+        lines.append("**Key Points:**\n" + "\n".join(f"- {kp}" for kp in kps))
+
+    if exs := data.get("examples"):
+        lines.append("**Examples:**\n" + "\n".join(f"- {ex}" for ex in exs))
+
+    if ac := data.get("additional_context"):
+        lines.append(f"**Additional Context:**\n{ac}")
+
+    if cl := data.get("confidence_level"):
+        lines.append(f"**Confidence Level:** {cl.title()}")
+
+    return {"final_answer": "\n\n".join(lines)}
+
+# ===== 4. Routing Logic =====
+def route_based_on_sufficiency(state: RAGState) -> str:
+    """Determine next workflow step"""
+    if state.get("context_sufficient", False):
+        return "sufficient"
+    if state.get("feedback_cycles", 0) >= 3:  # Max cycles
+        return "max_cycles"
+    return "insufficient"
+
+def route_after_feedback(state: RAGState) -> str:
+    """Decide next step after human feedback"""
+    if state.get("process_feedback") is True:
+        return "process_feedback"
+    return "skip_retrieval"
+
+# ===== 5. Graph Construction =====
+def build_rag_workflow():
+    """Construct the enhanced RAG workflow graph"""
+    builder = StateGraph(RAGState)
+
+    # Define nodes
+    builder.add_node("rewrite_question", rewrite_question_node)
+    builder.add_node("retrieve_documents", retrieve_documents_node)
+    builder.add_node("rank_and_select_documents", rank_and_select_documents_node)
+    builder.add_node("check_sufficiency", check_sufficiency_node)
+    builder.add_node("request_human_feedback", request_feedback_node)  # This sets ai_feedback_request
+    builder.add_node("structure_answer", structure_answer_node)
+    builder.add_node("generate_answer", generate_answer_node)
+
+    # Setup workflow structure
+    builder.set_entry_point("rewrite_question")
+
+    # Main flow
+    builder.add_edge("rewrite_question", "retrieve_documents")
+    builder.add_edge("retrieve_documents", "rank_and_select_documents")
+    builder.add_edge("rank_and_select_documents", "check_sufficiency")
+
+    # Conditional routing after sufficiency check
+    builder.add_conditional_edges(
+        "check_sufficiency",
+        route_based_on_sufficiency,
+        {
+            "sufficient": "structure_answer",
+            "insufficient": "request_human_feedback",
+            "max_cycles": "structure_answer"
+        }
+    )
+
+    # Feedback loop and final answer generation
+    builder.add_edge("request_human_feedback", "rewrite_question")  # Now goes directly to rewrite
+    builder.add_edge("structure_answer", "generate_answer")
+    builder.add_edge("generate_answer", END)
+
+    return builder.compile(
+        # checkpointer=memory,
+        interrupt_after=["request_human_feedback"]  # Interrupt after AI prepares feedback request
+    )
+
+app = build_rag_workflow()
+
+# ===== 6. Usage Example =====
+def run_rag_query(question: str, thread_id: str = "default"):
+    """Run a RAG query through the workflow"""
+    initial_state = {
+        "original_question": question,
+        "current_question": question,
+        "retrieved_docs": [],
+        "ranked_docs": [],
+        "context_sufficient": False,
+        "feedback_cycles": 0
+    }
+    
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    try:
+        result = app.invoke(initial_state, config=config)
+        return result.get("final_answer", "No answer generated")
+    except Exception as e:
+        logger.failure(f"RAG workflow failed: {str(e)}")
+        return f"Error: {str(e)}"
 
 if __name__ == "__main__":
-    run()
+    # Test the workflow
+    test_question = "What are the main benefits of using vector databases?"
+    answer = run_rag_query(test_question)
+    print(f"Question: {test_question}")
+    print(f"Answer: {answer}")
