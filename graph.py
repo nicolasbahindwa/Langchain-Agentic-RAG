@@ -1,5 +1,7 @@
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.cache.memory import InMemoryCache
+from langgraph.types import CachePolicy
 from core.llm_manager import LLMManager, LLMProvider
 from core.search_manager import SearchManager
 from pipeline.vector_store import VectorStoreManager
@@ -8,8 +10,11 @@ from typing import TypedDict, List, Optional, Annotated, Literal
 from langchain_core.documents import Document
 from langchain.schema import Document
 from pydantic import BaseModel, Field
+from functools import partial
 import json
+import hashlib
 import html
+import re 
 
 # Initialize components
 search_manager = SearchManager()
@@ -315,7 +320,7 @@ Important:
         return {"ranked_docs": ranked_docs}
         
     except Exception as e:
-        logger.exception(f"Ranking failed: {e}")
+        logger.failure(f"Ranking failed: {e}")
         # Fallback: return first 5 documents with scores
         return {
             "ranked_docs": docs[:5],
@@ -406,6 +411,9 @@ def evaluate_feedback_node(state: RAGState) -> RAGState:
     logger.info("Processing human feedback for refinement")
     return {"process_feedback": True}
 
+def remove_control_characters(s: str) -> str:
+    """Remove non-printable control characters from string"""
+    return re.sub(r'[\x00-\x1f\x7f-\x9f]', '', s)
 def structure_answer_node(state: RAGState) -> RAGState:
     """Robust answer structuring with self-healing JSON"""
     docs = state.get("ranked_docs", [])
@@ -454,27 +462,34 @@ def structure_answer_node(state: RAGState) -> RAGState:
                 {"role": "user", "content": user_prompt}
             ])
             
+            # Clean control characters before parsing
+            cleaned_content = remove_control_characters(response.content)
+            
             # Try direct JSON parsing
             try:
-                structured_data = StructuredAnswer.model_validate_json(response.content)
+                structured_data = StructuredAnswer.model_validate_json(cleaned_content)
                 return {"structured_response": structured_data.model_dump()}
             except Exception as e:
                 logger.warning(f"JSON parse attempt {attempt+1} failed: {e}")
                 
                 # Self-healing: Ask LLM to fix its own JSON
+                # FIXED: Proper schema serialization
+                schema_str = json.dumps(StructuredAnswer.model_json_schema(), indent=2)
                 repair_prompt = f"""
         Previous response was invalid JSON. Please fix it.
 
         Invalid JSON:
-        {response.content}
+        {cleaned_content}
 
         Schema:
-        {StructuredAnswer.model_json_schema(indent=2)}
+        {schema_str}
 
         Return ONLY valid JSON:
         """
                 response = llm.invoke(repair_prompt)
-                structured_data = StructuredAnswer.model_validate_json(response.content)
+                # Clean repaired response too
+                cleaned_repair = remove_control_characters(response.content)
+                structured_data = StructuredAnswer.model_validate_json(cleaned_repair)
                 return {"structured_response": structured_data.model_dump()}
                 
         except Exception as e:
@@ -483,7 +498,7 @@ def structure_answer_node(state: RAGState) -> RAGState:
             user_prompt = f"Previous error: {str(e)[:200]}\n\n{user_prompt}"
     
     # Final fallback after all attempts
-    logger.exception("Structured answer generation failed after 3 attempts")
+    logger.failure("Structured answer generation failed after 3 attempts")
     return {"structured_response": {
         "main_answer": "Could not generate structured answer",
         "explanation": "Technical error in processing documents",
@@ -538,58 +553,153 @@ def route_after_feedback(state: RAGState) -> str:
         return "process_feedback"
     return "skip_retrieval"
 
+# ------------------------------------------------------------------
+# Cache Key Generator (extracted outside build function)
+# ------------------------------------------------------------------
+def create_robust_cache_key(state: RAGState, *key_fields):
+    # Handle non-dictionary states (e.g., during visualization)
+    if not isinstance(state, dict):
+        return "default_cache_key"  # Return a placeholder key
+    
+    key_data = {}
+    for field in key_fields:
+        value = state.get(field)
+        if value is not None:
+            if isinstance(value, dict):
+                key_data[field] = dict(sorted(value.items()))
+            elif isinstance(value, (list, tuple)):
+                key_data[field] = value
+            else:
+                key_data[field] = value
+    try:
+        json_str = json.dumps(key_data, sort_keys=True, separators=(',', ':'))
+    except (TypeError, ValueError):
+        json_str = str(sorted(key_data.items()))
+    return hashlib.sha256(json_str.encode()).hexdigest() if len(json_str) > 200 else json_str
+
 # ===== 5. Graph Construction =====
+# def build_rag_workflow():
+#     """Construct the enhanced RAG workflow graph"""
+#     builder = StateGraph(RAGState)
+
+#     # Define nodes
+#     builder.add_node("rewrite_question", rewrite_question_node)
+#     builder.add_node("retrieve_documents", retrieve_documents_node)
+#     builder.add_node("rank_and_select_documents", rank_and_select_documents_node)
+#     builder.add_node("check_sufficiency", check_sufficiency_node)
+#     builder.add_node("request_human_feedback", request_feedback_node)
+#     builder.add_node("evaluate_feedback", evaluate_feedback_node)
+#     builder.add_node("structure_answer", structure_answer_node)
+#     builder.add_node("generate_answer", generate_answer_node)
+
+#     # Setup workflow structure
+#     builder.set_entry_point("rewrite_question")
+
+#     # Main flow
+#     builder.add_edge("rewrite_question", "retrieve_documents")
+#     builder.add_edge("retrieve_documents", "rank_and_select_documents")
+#     builder.add_edge("rank_and_select_documents", "check_sufficiency")
+
+#     # Conditional routing after sufficiency check
+#     builder.add_conditional_edges(
+#         "check_sufficiency",
+#         route_based_on_sufficiency,
+#         {
+#             "sufficient": "structure_answer",
+#             "insufficient": "request_human_feedback",
+#             "max_cycles": "structure_answer"
+#         }
+#     )
+
+#     # Feedback handling flow
+#     builder.add_edge("request_human_feedback", "evaluate_feedback")
+#     builder.add_conditional_edges(
+#         "evaluate_feedback",
+#         route_after_feedback,
+#         {
+#             "process_feedback": "rewrite_question",
+#             "skip_retrieval": "structure_answer"
+#         }
+#     )
+
+#     # Final answer flow
+#     builder.add_edge("structure_answer", "generate_answer")
+#     builder.add_edge("generate_answer", END)
+
+#     return builder.compile(
+#         # checkpointer=memory,  # UNCOMMENTED
+#         interrupt_after=["request_human_feedback"]
+#     )
+
 def build_rag_workflow():
-    """Construct the enhanced RAG workflow graph"""
+    from langgraph.graph import StateGraph, END
+    from langgraph.checkpoint.memory import MemorySaver
+
     builder = StateGraph(RAGState)
 
-    # Define nodes
+    # Nodes without caching
     builder.add_node("rewrite_question", rewrite_question_node)
-    builder.add_node("retrieve_documents", retrieve_documents_node)
-    builder.add_node("rank_and_select_documents", rank_and_select_documents_node)
+
+    # Node 1 – Document retrieval – cached on current_question + max_docs_for_llm
+    builder.add_node(
+        "retrieve_documents",
+        retrieve_documents_node,
+        cache_policy=CachePolicy(
+            key_func=partial(create_robust_cache_key, "current_question", "max_docs_for_llm"),
+            ttl=3600
+        )
+    )
+
+    # Node 2 – Document ranking – cached on current_question + retrieved_docs
+    builder.add_node(
+        "rank_and_select_documents",
+        rank_and_select_documents_node,
+        cache_policy=CachePolicy(
+            key_func=partial(create_robust_cache_key, "current_question", "retrieved_docs"),
+            ttl=3600
+        )
+    )
+
+    # Remaining nodes (no caching)
     builder.add_node("check_sufficiency", check_sufficiency_node)
     builder.add_node("request_human_feedback", request_feedback_node)
-    builder.add_node("evaluate_feedback", evaluate_feedback_node)  # NEW NODE
+    builder.add_node("evaluate_feedback", evaluate_feedback_node)
     builder.add_node("structure_answer", structure_answer_node)
     builder.add_node("generate_answer", generate_answer_node)
 
-    # Setup workflow structure
+    # ------------------------------------------------------------------
+    # Edges – unchanged
+    # ------------------------------------------------------------------
     builder.set_entry_point("rewrite_question")
-
-    # Main flow
     builder.add_edge("rewrite_question", "retrieve_documents")
     builder.add_edge("retrieve_documents", "rank_and_select_documents")
     builder.add_edge("rank_and_select_documents", "check_sufficiency")
 
-    # Conditional routing after sufficiency check
     builder.add_conditional_edges(
         "check_sufficiency",
         route_based_on_sufficiency,
-        {
-            "sufficient": "structure_answer",
-            "insufficient": "request_human_feedback",
-            "max_cycles": "structure_answer"
-        }
+        {"sufficient": "structure_answer",
+         "insufficient": "request_human_feedback",
+         "max_cycles": "structure_answer"}
     )
 
-    # Feedback handling flow
     builder.add_edge("request_human_feedback", "evaluate_feedback")
     builder.add_conditional_edges(
         "evaluate_feedback",
         route_after_feedback,
-        {
-            "process_feedback": "rewrite_question",
-            "skip_retrieval": "structure_answer"
-        }
+        {"process_feedback": "rewrite_question",
+         "skip_retrieval": "structure_answer"}
     )
-
-    # Final answer flow
     builder.add_edge("structure_answer", "generate_answer")
     builder.add_edge("generate_answer", END)
 
+    # ------------------------------------------------------------------
+    # Compile with in-memory cache backend
+    # ------------------------------------------------------------------
     return builder.compile(
-        # checkpointer=memory,  # UNCOMMENTED
-        interrupt_after=["request_human_feedback"]
+        # checkpointer=MemorySaver(),
+        interrupt_after=["request_human_feedback"],
+        cache=InMemoryCache()
     )
 
 app = build_rag_workflow()

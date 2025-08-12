@@ -14,3 +14,9 @@ logs/
 markdown/
 **/markdown/
 documents/markdown/
+
+.langraph_api
+
+# Ignore Python cache
+__pycache__/
+**/__pycache__/
