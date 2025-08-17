@@ -1,4 +1,6 @@
 
+
+
 from __future__ import annotations
 
 from typing import TypedDict, List, Optional, Dict, Any, Literal, Annotated, Tuple
@@ -50,7 +52,6 @@ MAX_FEEDBACK_CYCLES = 3
 RETRIEVAL_COUNT = 10
 RERANK_COUNT = 5
 
-
 CONFIDENCE_THRESHOLDS = {
     "HIGH_CONFIDENCE": 0.7,      # → Direct answer generation
     "MEDIUM_CONFIDENCE": 0.5,    # → Partial answer with disclaimer  
@@ -58,6 +59,21 @@ CONFIDENCE_THRESHOLDS = {
 }
 
 RETRIEVAL_STRATEGIES = ["hybrid", "keyword", "vector"]
+
+# ------------------------------------------------------------------
+# SIMPLE MESSAGE EXTRACTION - THE ONLY CHANGE
+# ------------------------------------------------------------------
+def get_latest_human_message(messages: List[BaseMessage]) -> Optional[str]:
+    """Get the latest human message. Simple and clean."""
+    if not messages:
+        return None
+    
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage) and message.content.strip():
+            return message.content.strip()
+    
+    return None
+
 # ------------------------------------------------------------------
 # CACHE UTILITIES
 # ------------------------------------------------------------------
@@ -135,27 +151,39 @@ class RAGState(TypedDict):
 # ------------------------------------------------------------------
 # ENHANCED UTILITIES
 # ------------------------------------------------------------------
-def detect_language_smart(text: str) -> Tuple[str, float]:
-    """Smart language detection using lightweight LLM with confidence scoring"""
+async def detect_question_language(question: str) -> str:
+    """Use LLM to detect the language of the question for consistent responses"""
     try:
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "Detect the language of the text. Respond with ONLY the language code (en, fr, es, de, etc.) followed by confidence 0-1. Format: 'language_code confidence'. Example: 'fr 0.95'"),
-            ("human", "Text: {text}")
+            ("system", """Detect the language of the question and respond with ONLY the language name in English.
+            
+            Examples:
+            - "What is AI?" → English
+            - "Qu'est-ce que l'IA?" → French 
+            - "¿Qué es la IA?" → Spanish
+            - "Was ist KI?" → German
+            - "什么是人工智能？" → Chinese
+            - "Che cos'è l'IA?" → Italian
+            - "O que é IA?" → Portuguese
+            - "AI とは何ですか？" → Japanese
+            - "AI란 무엇인가요?" → Korean
+            - "Что такое ИИ?" → Russian
+            - "AI کیا ہے؟" → Urdu
+            - "ما هو الذكاء الاصطناعي؟" → Arabic
+            
+            Only respond with the language name in English. Nothing else."""),
+            ("human", "Detect the language of this question: {question}")
         ])
-        formatted = prompt.format_messages(text=text[:200])  # Use first 200 chars for efficiency
-        response = llm.ainvoke(formatted)
+        formatted = prompt.format_messages(question=question)
+        response = await llm.ainvoke(formatted)
         
-        # Parse response
-        parts = response.content.strip().split()
-        if len(parts) >= 2:
-            lang_code = parts[0]
-            confidence = float(parts[1])
-            return lang_code, confidence
-        else:
-            return "auto", 0.5
+        detected_language = response.content.strip()
+        logger.info(f"Detected language: {detected_language}")
+        return detected_language
+        
     except Exception as e:
         logger.warning(f"Language detection failed: {e}")
-        return "auto", 0.5
+        return "English"  # Default fallback
 
 def fallback_retrieval(query: str, strategy: str) -> Tuple[List[dict], List[float]]:
     """Implement fallback retrieval strategies with graceful degradation"""
@@ -205,7 +233,7 @@ def batch_evaluate_documents(question: str, docs: List[dict], language: str) -> 
     
     try:
         context = format_docs(docs)
-        language_instruction = f"Respond in {language}" if language != "auto" else ""
+        language_instruction = f"Respond in {language}" if language != "English" else ""
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""Evaluate documents for answering the question. {language_instruction}
@@ -220,7 +248,8 @@ def batch_evaluate_documents(question: str, docs: List[dict], language: str) -> 
             - PARTIAL (0.3-0.7): Context has some relevant information but incomplete  
             - INSUFFICIENT (0.0-0.3): Context lacks relevant information or only general mentions
             
-            Be precise with confidence scoring."""),
+            Be precise with confidence scoring.
+            IMPORTANT: Respond in the exact same language as the question: {language}"""),
             ("human", "Question: {question}\n\nContext:\n{context}")
         ])
         
@@ -271,7 +300,7 @@ def reset_state_for_next_question(state: RAGState) -> None:
     """Reset state for next question while preserving messages - COMPREHENSIVE RESET"""
     state["question"] = ""
     state["original_question"] = ""
-    state["question_language"] = ""
+    state["question_language"] = "English"  # Reset to default
     state["documents"] = []
     state["ranked_documents"] = []
     state["feedback"] = None
@@ -281,18 +310,21 @@ def reset_state_for_next_question(state: RAGState) -> None:
     state["evaluation_result"] = None
     state["status"] = ""
     state["loading_message"] = ""
+    state["confidence_score"] = 0.0
+    state["retrieval_strategy_used"] = ""
+    state["retrieval_attempts"] = 0
     # Clear any waiting flags
     state.pop("waiting_for_feedback", None)
     logger.info("State reset for new question")
 
 # ------------------------------------------------------------------
-# NODES
+# NODES - UPDATED WITH SIMPLE MESSAGE EXTRACTION
 # ------------------------------------------------------------------
 async def rewrite_question(state: RAGState) -> RAGState:
-    """Entry point - optimize question and detect language efficiently"""
+    """Entry point - get last human message and optimize it"""
     # Set defaults
     defaults = {
-        "messages": [], "question": "", "original_question": "", "question_language": "",
+        "messages": [], "question": "", "original_question": "", "question_language": "English",
         "documents": [], "ranked_documents": [], "answer": None, "feedback": None,
         "feedback_cycles": 0, "status": "", "error": None, "sources": [],
         "loading_message": "", "evaluation_result": None, "confidence_score": 0.0,
@@ -300,51 +332,56 @@ async def rewrite_question(state: RAGState) -> RAGState:
     }
     state = {**defaults, **state}
     
-    # Handle new questions vs feedback with smart detection
-    if not state["question"] and state["feedback_cycles"] == 0:
-        latest_human_message = None
-        for m in reversed(state["messages"]):
-            if isinstance(m, HumanMessage) and m.content.strip():
-                latest_human_message = m.content.strip()
-                break
-        
-        if latest_human_message:
-            # Check if this is a new question
-            if state.get("original_question") and latest_human_message != state["original_question"]:
-                logger.info(f"NEW QUESTION detected - resetting state")
-                reset_state_for_next_question(state)
-                state["question"] = state["original_question"] = latest_human_message
-            else:
-                state["question"] = state["original_question"] = latest_human_message
-                
+    # SIMPLIFIED: Just get the last human message
+    current_input = get_latest_human_message(state["messages"])
+    
+    if not current_input:
+        state["status"] = "error"
+        state["error"] = "No input provided"
+        return set_loading_message(state, "Error: no input detected.")
+    
+    # Check if this is different from what we processed before
+    if state.get("original_question") and current_input != state["original_question"]:
+        logger.info(f"NEW INPUT detected: '{current_input[:50]}...'")
+        reset_state_for_next_question(state)
+    
+    # Set the current input as our question
+    state["question"] = current_input
+    if not state.get("original_question"):
+        state["original_question"] = current_input
+    
     if state["feedback_cycles"] == 0:
         set_loading_message(state, "Analyzing question and detecting language...")
-        # Smart language detection
-        lang_code, lang_confidence = detect_language_smart(state["question"])
-        state["question_language"] = lang_code
-        logger.info(f"Detected language: {lang_code} (confidence: {lang_confidence:.2f})")
+        # LLM-based language detection
+        detected_language = await detect_question_language(state["question"])
+        state["question_language"] = detected_language
+        logger.info(f"Detected language: {detected_language}")
     else:
         set_loading_message(state, f"Refining search based on feedback (cycle {state['feedback_cycles']})...")
                 
-    if not state["question"]:
-        state["status"] = "error"
-        state["error"] = "No question provided"
-        return set_loading_message(state, "Error: no question detected.")
-
     # Optimize question for search
     try:
-        language_instruction = f"Respond in {state['question_language']}" if state['question_language'] != "auto" else ""
-        
+        # ENFORCE LANGUAGE: All responses must be in the detected language
         if state["feedback_cycles"] == 0:
             prompt = ChatPromptTemplate.from_messages([
-                ("system", f"Rewrite this question to make it clearer and more searchable. {language_instruction} Return ONLY the rewritten question."),
-                ("human", "Question: {question}")
+                ("system", f"""Rewrite this question to make it clearer and more searchable.
+                
+                CRITICAL: You MUST respond in {state['question_language']}. Do not use any other language.
+                Return ONLY the rewritten question in {state['question_language']}."""),
+                ("human", "Question to rewrite: {question}")
             ])
             formatted = prompt.format_messages(question=state["question"])
         else:
             prompt = ChatPromptTemplate.from_messages([
-                ("system", f"Incorporate feedback to create a better search query. {language_instruction} Return ONLY the rewritten question."),
-                ("human", "Original: {original}\nCurrent: {current}\nFeedback: {feedback}\n\nNew search query:")
+                ("system", f"""Incorporate the feedback to create a better search query.
+                
+                CRITICAL: You MUST respond in {state['question_language']}. Do not use any other language.
+                Return ONLY the rewritten question in {state['question_language']}."""),
+                ("human", """Original question: {original}
+Current version: {current}
+User feedback: {feedback}
+
+Create a new search query incorporating this feedback:""")
             ])
             formatted = prompt.format_messages(
                 original=state["original_question"],
@@ -352,10 +389,10 @@ async def rewrite_question(state: RAGState) -> RAGState:
                 feedback=state["feedback"]
             )
 
-        response = await llm.ainvoke(formatted)  # Use light LLM for efficiency
+        response = await llm.ainvoke(formatted)
         rewritten = response.content.strip()
         state["question"] = rewritten
-        state["status"] = "retrieve_documents"  # SIMPLIFIED: Go directly to combined step
+        state["status"] = "check_existing_documents"
         
         set_loading_message(state, f"Optimized question → {rewritten}")
         return state
@@ -363,10 +400,8 @@ async def rewrite_question(state: RAGState) -> RAGState:
     except Exception as e:
         logger.failure(f"Question rewriting failed: {e}")
         # Graceful degradation: use original question
-        state["status"] = "retrieve_documents"
+        state["status"] = "check_existing_documents"
         return set_loading_message(state, "Using original question for search...")
-
- 
 
 async def check_existing_documents(state: RAGState) -> RAGState:
     """Smart check if existing documents can answer the current question - PRECISE CHECKING"""
@@ -393,31 +428,35 @@ async def check_existing_documents(state: RAGState) -> RAGState:
         if is_new_question:
             # Quick topical relevance check for new questions
             sample_content = " ".join([doc.get("page_content", "")[:200] for doc in docs_to_check[:3]])
-            language_instruction = f"Respond in the same language as the question: {state['question_language']}" if state['question_language'] != "auto" else ""
             
             relevance_prompt = ChatPromptTemplate.from_messages([
-                ("system", f"Are the documents topically relevant to the question? {language_instruction} Answer only 'RELEVANT' or 'NOT_RELEVANT'."),
+                ("system", f"""Are the documents topically relevant to the question?
+                
+                CRITICAL: You MUST respond in {state['question_language']}. Do not use any other language.
+                Answer only 'RELEVANT' or 'NOT_RELEVANT' in {state['question_language']}."""),
                 ("human", "Question: {question}\n\nDocument content sample:\n{content}")
             ])
             formatted = relevance_prompt.format_messages(question=state["question"], content=sample_content)
             response = await llm.ainvoke(formatted)
             
-            if "NOT_RELEVANT" in response.content.upper():
+            if "NOT_RELEVANT" in response.content.upper() or "PAS PERTINENT" in response.content.upper() or "NO RELEVANTE" in response.content.upper():
                 state["status"] = "retrieve_documents"
                 return set_loading_message(state, "Existing documents not topically relevant - retrieving fresh content...")
         
         # Now check if documents can provide meaningful information for the question
         context = format_docs(docs_to_check)
-        language_instruction = f"Respond in the same language as the question: {state['question_language']}" if state['question_language'] != "auto" else ""
         
         prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""Evaluate if the context contains meaningful information to answer the question. {language_instruction}
+            ("system", f"""Evaluate if the context contains meaningful information to answer the question.
+            
+            CRITICAL: You MUST respond in {state['question_language']}. Do not use any other language.
             
             Be PRECISE:
             - Answer 'YES' only if context contains specific information that can help answer the question (fully or partially)
             - Answer 'NO' if context only mentions general topics without specific relevant information
             
-            IMPORTANT: General mentions of topics without specific details should be 'NO'."""),
+            IMPORTANT: General mentions of topics without specific details should be 'NO'.
+            Respond with YES or NO in {state['question_language']}."""),
             ("human", "Question: {question}\n\nContext:\n{context}")
         ])
         formatted = prompt.format_messages(question=state["question"], context=context)
@@ -442,7 +481,7 @@ async def retrieve_documents(state: RAGState) -> RAGState:
     """Retrieve documents from vector store"""
     set_loading_message(state, "Searching knowledge base...")
     try:
-        docs, scores =  vector_store.query_documents(
+        docs, scores = vector_store.query_documents(
             query=state["question"],
             k=RETRIEVAL_COUNT,
             rerank=False,
@@ -460,6 +499,7 @@ async def retrieve_documents(state: RAGState) -> RAGState:
         state["status"] = "error"
         state["error"] = f"Retrieval error: {e}"
         return set_loading_message(state, "Error while retrieving documents.")
+
 def rank_documents(state: RAGState) -> RAGState:
     """Re-rank documents by relevance"""
     set_loading_message(state, "Ranking results by relevance...")
@@ -507,10 +547,11 @@ async def evaluate_content(state: RAGState) -> RAGState:
 
     try:
         context = format_docs(state["ranked_documents"])
-        language_instruction = f"Respond in the same language as the question: {state['question_language']}" if state['question_language'] != "auto" else ""
         
         prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""Evaluate if the context contains relevant information to answer the question. {language_instruction}
+            ("system", f"""Evaluate if the context contains relevant information to answer the question.
+            
+            CRITICAL: You MUST respond in {state['question_language']}. Do not use any other language.
             
             Be PRECISE in your evaluation:
             
@@ -520,7 +561,9 @@ async def evaluate_content(state: RAGState) -> RAGState:
             
             IMPORTANT: If the context talks about general topics but doesn't contain the specific information asked for, classify as 'INSUFFICIENT', not 'PARTIAL'.
             
-            Then explain what specific information was found and what's missing."""),
+            Then explain what specific information was found and what's missing.
+            
+            Remember: Respond entirely in {state['question_language']}."""),
             ("human", "Question: {question}\n\nContext:\n{context}")
         ])
         formatted = prompt.format_messages(question=state["question"], context=context)
@@ -535,9 +578,8 @@ async def evaluate_content(state: RAGState) -> RAGState:
             return set_loading_message(state, "Content fully answers question - generating response...")
         elif evaluation.startswith("PARTIAL"):
             # Double-check: is there actually meaningful content to work with?
-                state["status"] = "generate_answer"
-                return set_loading_message(state, "Partial answer found - generating response with suggestions...")
-           
+            state["status"] = "generate_answer"
+            return set_loading_message(state, "Partial answer found - generating response with suggestions...")
         else:
             # INSUFFICIENT - go to human feedback
             state["status"] = "request_feedback"
@@ -548,7 +590,6 @@ async def evaluate_content(state: RAGState) -> RAGState:
         state["status"] = "request_feedback"
         return set_loading_message(state, "Evaluation failed - requesting feedback")
 
-
 async def request_feedback(state: RAGState) -> RAGState:
     """Request user feedback for insufficient content - PRECISE FEEDBACK REQUESTS"""
     set_loading_message(state, "Preparing feedback request...")
@@ -557,7 +598,7 @@ async def request_feedback(state: RAGState) -> RAGState:
     evaluation = state.get("evaluation_result", "No evaluation available")
     found_content = format_docs(state["ranked_documents"]) if state["ranked_documents"] else "No documents found"
     
-    language_instruction = f"Respond in the same language as the original question: {state['question_language']}" if state['question_language'] != "auto" else ""
+    language_instruction = f"Respond in {state['question_language']}" if state['question_language'] != "English" else ""
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", f"""The search did not find sufficient information to answer the user's question. {language_instruction}
@@ -593,17 +634,12 @@ async def request_feedback(state: RAGState) -> RAGState:
     return state
 
 def process_feedback(state: RAGState) -> RAGState:
-    """Process user feedback"""
+    """Process user feedback - SIMPLIFIED WITH LAST HUMAN MESSAGE"""
     set_loading_message(state, "Processing your feedback...")
     
-    # Extract feedback from latest human message
-    feedback = state.get("feedback")
-    if not feedback:
-        for message in reversed(state["messages"]):
-            if isinstance(message, HumanMessage):
-                feedback = message.content.strip()
-                break
-                
+    # SIMPLIFIED: Just get the last human message as feedback
+    feedback = get_latest_human_message(state["messages"])
+    
     if not feedback:
         state["status"] = "generate_answer"
         state["waiting_for_feedback"] = False
@@ -679,8 +715,8 @@ async def generate_answer(state: RAGState) -> RAGState:
         # Confidence-based answer generation
         confidence = state.get("confidence_score", 0.0)
         classification = state.get("evaluation_result", "PARTIAL")
-        language = state.get("question_language", "auto")
-        language_instruction = f"Answer in {language}" if language != "auto" else ""
+        language = state.get("question_language", "English")
+        language_instruction = f"Answer in {language}" if language != "English" else ""
         
         if confidence >= CONFIDENCE_THRESHOLDS["HIGH_CONFIDENCE"]:
             # High confidence - comprehensive answer
@@ -690,7 +726,8 @@ async def generate_answer(state: RAGState) -> RAGState:
             1. Answer the question thoroughly based on the context
             2. Cite specific document names when referencing information
             3. Be detailed and specific
-            4. Use authoritative tone since confidence is high"""
+            4. Use authoritative tone since confidence is high
+            5. IMPORTANT: Respond in the exact same language as the original question: {language}"""
             
         elif confidence >= CONFIDENCE_THRESHOLDS["MEDIUM_CONFIDENCE"]:
             # Medium confidence - partial answer with clear limitations
@@ -701,7 +738,8 @@ async def generate_answer(state: RAGState) -> RAGState:
             2. Cite specific document names when referencing information
             3. At the end, clearly state: "This is a partial answer based on available documents"
             4. Suggest asking more specific questions about areas that need clarification
-            5. Be helpful but acknowledge limitations"""
+            5. Be helpful but acknowledge limitations
+            6. IMPORTANT: Respond in the exact same language as the original question: {language}"""
             
         else:
             # Low confidence - minimal answer with strong disclaimers
@@ -711,7 +749,8 @@ async def generate_answer(state: RAGState) -> RAGState:
             1. Share only what specific information is clearly available
             2. Cite document names for any information provided
             3. Clearly state: "Based on available documents, I can only provide limited information"
-            4. Strongly suggest the user provide more specific search terms or clarify their question"""
+            4. Strongly suggest the user provide more specific search terms or clarify their question
+            5. IMPORTANT: Respond in the exact same language as the original question: {language}"""
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt),
@@ -753,8 +792,6 @@ async def generate_answer(state: RAGState) -> RAGState:
         state["status"] = "request_feedback"
         state["error"] = f"Generation error: {e}"
         return set_loading_message(state, "Error generating answer - requesting guidance...")
-
- 
 
 # ------------------------------------------------------------------
 # ROUTING FUNCTIONS
