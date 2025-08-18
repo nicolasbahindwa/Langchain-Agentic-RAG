@@ -1,7 +1,7 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-        "lawyer": "./graph.py:app"
+        "lawyer": "research_agent_mcp.py:app"
     },
     "env": ".env",
     "python_version": "3.11",
