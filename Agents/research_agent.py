@@ -160,4 +160,4 @@ agent_builder.add_edge("tool_node", "llm_call") # Loop back for more research
 agent_builder.add_edge("compress_research", END)
 
 # Compile the agent
-app = agent_builder.compile()
+research_agent = agent_builder.compile()
