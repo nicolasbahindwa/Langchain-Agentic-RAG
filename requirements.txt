@@ -38,6 +38,7 @@ pypdf
 unstructured
 qdrant-client
 langchain-qdrant
+langchain_mcp_adapters
  
 
 langchain-tavily
@@ -47,7 +48,7 @@ duckduckgo-search
 ddgs
 
 
- 
+seaborn
 
 ipython
 

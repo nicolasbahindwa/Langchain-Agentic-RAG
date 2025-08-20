@@ -1,7 +1,7 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-        "orchestrator": "graph:app"
+        "orchestrator": "agent:app"
     },
     "env": ".env",
     "python_version": "3.11",
