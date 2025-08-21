@@ -30,6 +30,7 @@ langchain-core
 langchain-huggingface
 langgraph
 langgraph-cli[inmem]
+langgraph-supervisor
 langgraph-checkpoint-sqlite
 langchain_chroma
 aiosqlite
