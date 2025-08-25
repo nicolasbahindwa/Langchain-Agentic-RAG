@@ -35,3 +35,17 @@ Agentic-RAG is a retrieval-augmented generation (RAG) framework powered by **Lan
 
 
  
+
+references:
+using useStream
+https://docs.langchain.com/langgraph-platform/use-stream-react
+
+using supervisor
+https://langchain-ai.lang.chat/langgraph/tutorials/multi_agent/agent_supervisor/#research-agent
+
+node caching in langgraph
+https://langchain-ai.github.io/langgraph/concepts/low_level/?_gl=1*tjh88s*_gcl_au*Mzg3Njc5NjAyLjE3NTAyMzAyNjA.*_ga*MTIzOTcxMTY5LjE3NDcwOTk0OTI.*_ga_47WX3HKKY2*czE3NTU1OTA0MDgkbzM1JGcxJHQxNzU1NTkwNDgxJGo2MCRsMCRoMA..#end-node
+
+
+creating ReAct Agent from scratch:
+https://langchain-ai.github.io/langgraph/how-tos/react-agent-from-scratch/?h=react#define-nodes-and-edges
