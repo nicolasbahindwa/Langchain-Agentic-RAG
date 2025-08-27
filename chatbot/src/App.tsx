@@ -3,7 +3,7 @@ import reactLogo from './assets/react.svg'
 import viteLogo from '/vite.svg'
 import './App.css'
 import { ChatApp } from './components'
-import { LangGraphChatApp } from './components/LanggraphAchatApp'
+import LangGraphChatApp from './components/LanggraphAchatApp'
 
 function App() {
  

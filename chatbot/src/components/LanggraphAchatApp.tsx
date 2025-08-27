@@ -173,6 +173,10 @@ const MessageBubble: React.FC<{
     ? message.branches[message.currentBranchIndex]
     : message.content;
 
+    if (message.type !== 'human' && message.type !== 'ai') {
+        return null;
+    }
+
   return (
     <div className={`flex ${message.type === 'human' ? 'justify-end' : 'justify-start'} mb-4 group`}>
       <div className={`max-w-3xl flex gap-3 ${message.type === 'human' ? 'flex-row-reverse' : 'flex-row'}`}>
@@ -570,11 +574,19 @@ export const LangGraphChatApp: React.FC = () => {
   };
 
   // Transform LangGraph messages to our Message type
-  const messages: Message[] = thread.messages.map(msg => ({
-    ...msg,
-    type: msg.type as 'human' | 'ai',
-    timestamp: new Date(),
-  }));
+    const messages: Message[] = thread.messages
+    .filter(msg => {
+        // Exclude tool messages and internal system messages
+        return msg.type === 'human' || 
+            msg.type === 'ai' || 
+            msg.type === 'system'; // Keep system messages if needed
+    })
+    .map(msg => ({
+        ...msg,
+        type: msg.type as 'human' | 'ai' | 'system',
+        timestamp: new Date(),
+        content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+    }));
 
   // Mock recent threads data
   const recentThreads: Thread[] = [
