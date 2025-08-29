@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import {EnhancedContentRenderer}  from './renders/EnhancedContentRenderer';
 import { useStream } from "@langchain/langgraph-sdk/react";
 import type { Message as LangGraphMessage } from "@langchain/langgraph-sdk";
 import { 
@@ -20,7 +21,11 @@ import {
   MessageSquare, 
   Settings,
   Brain,
-  Zap
+  Zap,
+  Play,
+  Pause,
+  AlertCircle,
+  RotateCcw
 } from 'lucide-react';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -55,6 +60,13 @@ interface ChatMessage {
   content: string;
   type: 'human' | 'ai';
   timestamp?: Date;
+  isInterrupted?: boolean;
+  needsHumanFeedback?: boolean;
+  versions?: string[]; // Multiple generations
+  currentVersionIndex?: number;
+  isIncomplete?: boolean;
+  originalHumanMessageId?: string; // Link AI responses to their triggering human message
+  isGeneratingVersion?: boolean; // Flag when generating a new version
 }
 
 interface ToolCall {
@@ -70,70 +82,56 @@ interface ToolActivity {
 interface StreamValues {
   messages?: LangGraphMessage[];
   is_generating?: boolean;
+  needs_clarification?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── MARKDOWN RENDERER ─────────────────────────────────────────────────────────
+// ─── UTILITY FUNCTIONS ─────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => {
-  const formatMarkdown = (text: string): string => {
-    return text
-      // Headers (process from h6 to h1 to avoid conflicts)
-      .replace(/^###### (.*$)/gim, '<h6 class="text-sm font-medium mt-4 mb-2 text-gray-700">$1</h6>')
-      .replace(/^##### (.*$)/gim, '<h5 class="text-base font-medium mt-4 mb-2 text-gray-700">$1</h5>')
-      .replace(/^#### (.*$)/gim, '<h4 class="text-base font-semibold mt-5 mb-2 text-gray-800">$1</h4>')
-      .replace(/^### (.*$)/gim, '<h3 class="text-lg font-semibold mt-6 mb-3 text-gray-800">$1</h3>')
-      .replace(/^## (.*$)/gim, '<h2 class="text-xl font-semibold mt-6 mb-3 text-gray-800">$1</h2>')
-      .replace(/^# (.*$)/gim, '<h1 class="text-2xl font-bold mt-6 mb-4 text-gray-900">$1</h1>')
-      // Bold text
-      .replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-gray-900">$1</strong>')
-      // Italic text
-      .replace(/\*(.*?)\*/g, '<em class="italic text-gray-700">$1</em>')
-      // Code blocks
-      .replace(/```([\s\S]*?)```/g, '<pre class="bg-gray-50 border border-gray-200 p-4 rounded-lg mt-3 mb-3 overflow-x-auto text-sm"><code class="text-gray-800">$1</code></pre>')
-      // Inline code
-      .replace(/`([^`]*)`/g, '<code class="bg-gray-100 px-2 py-1 rounded text-sm font-mono text-gray-800">$1</code>')
-      // Citations
-      .replace(/\[(\d+)\]/g, '<sup class="text-blue-600 font-medium text-xs">[$1]</sup>')
-      // Bullet points
-      .replace(/^\* (.*$)/gim, '<li class="ml-4 mb-1 text-gray-700">$1</li>')
-      .replace(/(<li.*<\/li>)/s, '<ul class="list-disc list-outside my-3 space-y-1">$1</ul>')
-      // Numbered lists
-      .replace(/^\d+\. (.*$)/gim, '<li class="ml-4 mb-1 text-gray-700">$1</li>')
-      // Line breaks and paragraphs
-      .replace(/\n\n/g, '</p><p class="mb-3 text-gray-700 leading-relaxed">')
-      .replace(/\n/g, '<br>');
-  };
+// Helper function to find last index (compatible alternative to findLastIndex)
+function findLastIndex<T>(array: T[], predicate: (item: T, index: number) => boolean): number {
+  for (let i = array.length - 1; i >= 0; i--) {
+    if (predicate(array[i], i)) {
+      return i;
+    }
+  }
+  return -1;
+}
 
-  const htmlContent = formatMarkdown(content);
-  
-  return (
-    <div 
-      className="prose prose-sm max-w-none text-gray-700"
-      dangerouslySetInnerHTML={{ 
-        __html: `<div class="leading-relaxed">${htmlContent}</div>` 
-      }} 
-    />
-  );
-};
+// Helper function to get the last human message ID
+function getLastHumanMessageId(messages: LangGraphMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].type === 'human') {
+      return messages[i].id;
+    }
+  }
+  return undefined;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── DATA PROCESSING ────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const processStreamMessages = (rawMessages: LangGraphMessage[] | undefined) => {
+const processStreamMessages = (rawMessages: LangGraphMessage[] | undefined, streamValues: StreamValues | undefined) => {
   if (!rawMessages) {
     return { 
       userMessages: [], 
       toolActivity: null, 
-      hasActiveToolCalls: false 
+      hasActiveToolCalls: false,
+      needsHumanFeedback: false
     };
   }
 
   const userMessages: ChatMessage[] = [];
   let activeToolCalls: ToolCall[] = [];
   let hasActiveToolCalls = false;
+  let needsHumanFeedback = false;
+
+  // Check if agent needs clarification (human-in-the-loop)
+  if (streamValues?.needs_clarification) {
+    needsHumanFeedback = true;
+  }
 
   // Process each message in the stream
   for (let i = 0; i < rawMessages.length; i++) {
@@ -174,7 +172,10 @@ const processStreamMessages = (rawMessages: LangGraphMessage[] | undefined) => {
           id: msg.id || `ai-${i}`, 
           type: 'ai', 
           content: msg.content,
-          timestamp: new Date()
+          timestamp: new Date(),
+          needsHumanFeedback: needsHumanFeedback,
+          versions: [msg.content],
+          currentVersionIndex: 0
         });
 
         // Clear tool activity once we have the final response
@@ -191,12 +192,26 @@ const processStreamMessages = (rawMessages: LangGraphMessage[] | undefined) => {
   const toolActivity: ToolActivity | null = hasActiveToolCalls ? 
     { toolCalls: activeToolCalls } : null;
 
-  return { userMessages, toolActivity, hasActiveToolCalls };
+  return { userMessages, toolActivity, hasActiveToolCalls, needsHumanFeedback };
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── UI COMPONENTS ──────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
+
+const PreparingIndicator: React.FC = () => (
+  <div className="flex justify-start mb-6">
+    <div className="max-w-4xl flex gap-3 items-start">
+      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0 shadow-lg">
+        <Bot className="w-5 h-5 text-white" />
+      </div>
+      <div className="bg-gradient-to-br from-gray-50 to-blue-50 border border-gray-200 rounded-2xl px-4 py-3 shadow-sm flex items-center gap-3">
+        <Loader className="w-4 h-4 animate-spin text-blue-600" />
+        <span className="text-sm font-medium text-gray-600">Preparing response...</span>
+      </div>
+    </div>
+  </div>
+);
 
 const GeneratingIndicator: React.FC = () => (
   <div className="flex justify-start mb-6">
@@ -215,6 +230,59 @@ const GeneratingIndicator: React.FC = () => (
     </div>
   </div>
 );
+
+const HumanFeedbackPrompt: React.FC<{
+  message: ChatMessage;
+  onFeedback: (feedback: string) => void;
+}> = ({ message, onFeedback }) => {
+  const [feedback, setFeedback] = useState('');
+
+  const handleSubmit = () => {
+    if (feedback.trim()) {
+      onFeedback(feedback.trim());
+      setFeedback('');
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
+
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mt-3">
+      <div className="flex items-center gap-2 mb-3">
+        <AlertCircle className="w-4 h-4 text-amber-600" />
+        <span className="text-sm font-semibold text-amber-800">
+          Human Feedback Needed
+        </span>
+      </div>
+      <p className="text-sm text-amber-700 mb-3">
+        The AI needs more information to provide a better answer. Please provide additional details or clarification.
+      </p>
+      <div className="flex gap-2">
+        <textarea
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Provide more details or clarify your question..."
+          className="flex-1 border border-amber-300 rounded-lg px-3 py-2 text-sm resize-none min-h-[60px] focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+          rows={2}
+        />
+        <button
+          onClick={handleSubmit}
+          disabled={!feedback.trim()}
+          className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:bg-amber-300 disabled:cursor-not-allowed text-sm font-medium flex items-center gap-2"
+        >
+          <Send className="w-4 h-4" />
+          Send
+        </button>
+      </div>
+    </div>
+  );
+};
 
 const ToolActivityIndicator: React.FC<{ activity: ToolActivity }> = ({ activity }) => {
   const getToolIcon = (toolName: string) => {
@@ -267,21 +335,174 @@ const ToolActivityIndicator: React.FC<{ activity: ToolActivity }> = ({ activity 
   );
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── MESSAGE CAROUSEL COMPONENT ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const MessageCarousel: React.FC<{
+  versions: string[];
+  currentIndex: number;
+  onVersionChange: (index: number) => void;
+  onRegenerate?: () => void;
+  isGenerating?: boolean;
+  isIncomplete?: boolean;
+  onResume?: () => void;
+}> = ({ versions, currentIndex, onVersionChange, onRegenerate, isGenerating, isIncomplete, onResume }) => {
+  // Calculate proper version display
+  const completedVersions = versions.length;
+  const totalVersionsIncludingGenerating = isGenerating ? completedVersions + 1 : completedVersions;
+  const displayCurrentIndex = currentIndex + 1;
+  const displayTotalVersions = Math.max(1, totalVersionsIncludingGenerating);
+  
+  const hasMultipleVersions = completedVersions > 1 || isGenerating;
+
+  return (
+    <div className="mt-4 pt-3 border-t border-gray-100">
+      <div className="flex items-center justify-between">
+        {/* Left side - Version info and navigation */}
+        <div className="flex items-center gap-3">
+          {isGenerating ? (
+            <div className="flex items-center gap-2">
+              <Loader className="w-4 h-4 animate-spin text-blue-600" />
+              <span className="text-sm text-blue-600 font-medium">
+                {completedVersions === 0 ? 'Generating...' : `Generating version ${completedVersions + 1}...`}
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <RotateCcw className="w-3 h-3 text-gray-500" />
+              <span className="text-xs font-medium text-gray-600">
+                {completedVersions} {completedVersions === 1 ? 'version' : 'versions'}
+              </span>
+            </div>
+          )}
+
+          {/* Carousel Navigation */}
+          {hasMultipleVersions && !isGenerating && (
+            <div className="flex items-center gap-1 ml-2">
+              <button
+                onClick={() => onVersionChange(Math.max(0, currentIndex - 1))}
+                disabled={currentIndex === 0}
+                className="p-1 rounded-md hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                title="Previous version"
+              >
+                <ChevronLeft className="w-4 h-4 text-gray-600" />
+              </button>
+              
+              <div className="px-3 py-1 bg-gray-100 rounded-full text-xs font-medium text-gray-700 min-w-[65px] text-center">
+                {displayCurrentIndex}/{displayTotalVersions}
+              </div>
+              
+              <button
+                onClick={() => onVersionChange(Math.min(completedVersions - 1, currentIndex + 1))}
+                disabled={currentIndex === completedVersions - 1}
+                className="p-1 rounded-md hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                title="Next version"
+              >
+                <ChevronRight className="w-4 h-4 text-gray-600" />
+              </button>
+            </div>
+          )}
+
+          {/* Show version counter even when generating */}
+          {isGenerating && completedVersions > 0 && (
+            <div className="px-3 py-1 bg-blue-100 rounded-full text-xs font-medium text-blue-700 min-w-[80px] text-center ml-2">
+              {displayCurrentIndex}/{displayTotalVersions}
+            </div>
+          )}
+        </div>
+
+        {/* Right side - Action buttons */}
+        <div className="flex items-center gap-2">
+          {/* Resume button for incomplete versions */}
+          {isIncomplete && onResume && !isGenerating && (
+            <button
+              onClick={onResume}
+              className="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 text-green-700 rounded transition-colors flex items-center gap-1"
+              title="Resume this version"
+            >
+              <Play className="w-3 h-3" />
+              Resume
+            </button>
+          )}
+
+          {/* Regenerate button */}
+          {onRegenerate && !isGenerating && (
+            <button
+              onClick={onRegenerate}
+              className="text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition-colors flex items-center gap-1"
+              title="Generate new version"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Regenerate
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── MESSAGE BUBBLE COMPONENT ──────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
 const MessageBubble: React.FC<{ 
   message: ChatMessage; 
-  isLastMessage?: boolean; 
-}> = ({ message, isLastMessage = false }) => {
+  isLastMessage?: boolean;
+  onRegenerate?: () => void;
+  onResume?: () => void;
+  onHumanFeedback?: (feedback: string) => void;
+  onEditMessage?: (messageId: string, newContent: string) => void;
+  onVersionChange?: (index: number) => void;
+  userQuery?: string; 
+}> = ({ message, isLastMessage = false, onRegenerate, onResume, onHumanFeedback, onEditMessage, onVersionChange ,  userQuery = ''}) => {
   const [copied, setCopied] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState(message.content);
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(message.content);
+      const versions = message.versions || [message.content];
+      const currentIndex = message.currentVersionIndex || 0;
+      const currentContent = versions[currentIndex] || message.content;
+      await navigator.clipboard.writeText(currentContent);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       console.error('Failed to copy text:', err);
     }
   };
+
+  const handleStartEdit = () => {
+    setIsEditing(true);
+    setEditContent(message.content);
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setEditContent(message.content);
+  };
+
+  const handleSaveEdit = () => {
+    if (editContent.trim() && editContent.trim() !== message.content) {
+      onEditMessage?.(message.id, editContent.trim());
+    }
+    setIsEditing(false);
+  };
+
+  const handleEditKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSaveEdit();
+    } else if (e.key === 'Escape') {
+      handleCancelEdit();
+    }
+  };
+
+  const versions = message.versions || [message.content];
+  const currentIndex = message.currentVersionIndex || 0;
+  const currentContent = versions[currentIndex] || message.content;
 
   return (
     <div className={`flex ${message.type === 'human' ? 'justify-end' : 'justify-start'} mb-6 group`}>
@@ -306,29 +527,102 @@ const MessageBubble: React.FC<{
               ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white ml-12' 
               : 'bg-white border border-gray-200'
           }`}>
-            {message.type === 'ai' ? (
-              <MarkdownRenderer content={message.content} />
+            {/* Message Content */}
+            {isEditing && message.type === 'human' ? (
+              // Edit Mode for Human Messages
+              <div className="space-y-3">
+                <textarea
+                  value={editContent}
+                  onChange={(e) => setEditContent(e.target.value)}
+                  onKeyDown={handleEditKeyDown}
+                  className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-white placeholder-white/70 resize-none min-h-[60px] focus:outline-none focus:border-white/40"
+                  placeholder="Edit your message..."
+                  autoFocus
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={handleCancelEdit}
+                    className="px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded-lg text-xs text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveEdit}
+                    disabled={!editContent.trim() || editContent.trim() === message.content}
+                    className="px-3 py-1.5 bg-white text-blue-600 hover:bg-white/90 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Save & Resend
+                  </button>
+                </div>
+              </div>
             ) : (
-              <p className="whitespace-pre-wrap text-sm leading-relaxed">
-                {message.content}
-              </p>
+              // Normal Display Mode
+              <>
+                {message.type === 'ai' ? (
+                  <EnhancedContentRenderer 
+                    content={currentContent} 
+                    userQuery={userQuery} // Pass the user query for context
+                  />
+                ) : (
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed">
+                    {currentContent}
+                  </p>
+                )}
+
+                {/* Carousel for AI messages */}
+                {message.type === 'ai' && (
+                  <MessageCarousel
+                    versions={versions}
+                    currentIndex={currentIndex}
+                    onVersionChange={onVersionChange || (() => {})}
+                    onRegenerate={onRegenerate}
+                    isGenerating={message.isGeneratingVersion}
+                    isIncomplete={message.isIncomplete}
+                    onResume={onResume}
+                  />
+                )}
+              </>
             )}
 
-            {/* Copy Button for AI messages */}
-            {message.type === 'ai' && (
-              <button
-                onClick={handleCopy}
-                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600"
-                title="Copy message"
-              >
-                {copied ? (
-                  <Check className="w-4 h-4 text-green-500" />
-                ) : (
-                  <Copy className="w-4 h-4" />
+            {/* Action Buttons */}
+            {!isEditing && (
+              <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                {/* AI Message Actions */}
+                {message.type === 'ai' && (
+                  <button
+                    onClick={handleCopy}
+                    className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600"
+                    title="Copy current version"
+                  >
+                    {copied ? (
+                      <Check className="w-4 h-4 text-green-500" />
+                    ) : (
+                      <Copy className="w-4 h-4" />
+                    )}
+                  </button>
                 )}
-              </button>
+
+                {/* Human Message Actions */}
+                {message.type === 'human' && onEditMessage && (
+                  <button
+                    onClick={handleStartEdit}
+                    className="p-1.5 rounded-lg hover:bg-white/20 text-white/70 hover:text-white"
+                    title="Edit message"
+                  >
+                    <Edit3 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
             )}
           </div>
+
+          {/* Human Feedback Prompt */}
+          {message.type === 'ai' && message.needsHumanFeedback && onHumanFeedback && (
+            <HumanFeedbackPrompt
+              message={message}
+              onFeedback={onHumanFeedback}
+            />
+          )}
 
           {/* Timestamp */}
           {message.timestamp && (
@@ -464,6 +758,14 @@ const Sidebar: React.FC<{
             <Zap className="w-4 h-4 text-yellow-400" />
             Real-time Processing
           </div>
+          <div className="flex items-center gap-3 text-sm text-gray-300">
+            <RotateCcw className="w-4 h-4 text-green-400" />
+            Answer Carousel
+          </div>
+          <div className="flex items-center gap-3 text-sm text-gray-300">
+            <Play className="w-4 h-4 text-orange-400" />
+            Resume Generation
+          </div>
         </div>
       </div>
     </div>
@@ -472,10 +774,10 @@ const Sidebar: React.FC<{
     <div className="p-6 border-t border-gray-700">
       <div className="text-center">
         <div className="text-xs text-gray-400">
-          Advanced Research Assistant
+          Enhanced Research Assistant
         </div>
         <div className="text-xs text-gray-500 mt-1">
-          v2.0 • LangGraph SDK
+          v3.1 • Carousel UI
         </div>
       </div>
     </div>
@@ -484,10 +786,12 @@ const Sidebar: React.FC<{
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── MAIN APPLICATION ──────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════────════════════════
 
-export const LangGraphChatApp: React.FC = () => {
+export const EnhancedLangGraphChatApp: React.FC = () => {
   const [threadId, setThreadId] = useSearchParam('threadId');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isPreparingResponse, setIsPreparingResponse] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Configuration
@@ -501,37 +805,65 @@ export const LangGraphChatApp: React.FC = () => {
     threadId: threadId || undefined,
     onThreadId: setThreadId,
     reconnectOnMount: true,
+    onMessages: (messages) => {
+      // Handle regeneration messages
+      const lastMessage = messages[messages.length - 1];
+      if (lastMessage?.type === 'ai') {
+        const existingAIMessage = messages.find(msg => 
+          msg.type === 'ai' && 
+          msg.originalHumanMessageId === getLastHumanMessageId(messages)
+        );
+        
+        if (existingAIMessage) {
+          // This is a regeneration, update existing message
+          setMessages(prev => prev.map(msg => {
+            if (msg.id === existingAIMessage.id) {
+              const versions = msg.versions || [msg.content];
+              return {
+                ...msg,
+                versions: [...versions, lastMessage.content],
+                currentVersionIndex: versions.length,
+                content: lastMessage.content,
+                isGeneratingVersion: false,
+                isIncomplete: false
+              };
+            }
+            return msg;
+          }));
+        }
+      }
+    }
   });
 
   // Process messages for display
-  const { userMessages, toolActivity, hasActiveToolCalls } = useMemo(
-    () => processStreamMessages(stream.messages),
-    [stream.messages]
+  const { userMessages, toolActivity, hasActiveToolCalls, needsHumanFeedback } = useMemo(
+    () => processStreamMessages(stream.messages, stream.values),
+    [stream.messages, stream.values]
   );
 
+  // Update messages with proper regeneration handling
+  useEffect(() => {
+    if (isPreparingResponse && (hasActiveToolCalls || userMessages.some(msg => msg.type === 'ai'))) {
+      setIsPreparingResponse(false);
+    }
+
+    setMessages(userMessages);
+  }, [userMessages, hasActiveToolCalls, isPreparingResponse]);
+
   // UI state logic
-  const isGenerating = stream.values?.is_generating || false;
-  const showToolActivity = hasActiveToolCalls && userMessages.length > 0;
-  const showGeneratingIndicator = isGenerating && !showToolActivity && userMessages.length > 0;
+  const isGenerating = stream.values?.is_generating || stream.isLoading || false;
+  const showPreparingIndicator = isPreparingResponse;
+  const showToolActivity = hasActiveToolCalls && messages.length > 0 && !isPreparingResponse;
+  const showGeneratingIndicator = isGenerating && !showToolActivity && messages.length > 0 && !isPreparingResponse;
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [userMessages, showToolActivity, showGeneratingIndicator]);
-
-  // Event handlers
-  const handleSubmit = (input: string) => {
-    stream.submit({ 
-      messages: [{ type: "human", content: input }],
-      streamResumable: true
-    });
-  };
-
-  const handleNewThread = () => {
-    setThreadId(null);
-  };
+  }, [messages, showToolActivity, showGeneratingIndicator]);
 
   const getStatusText = (): string => {
+    if (showPreparingIndicator) return 'Preparing';
+    if (needsHumanFeedback) return 'Waiting for feedback';
     if (showToolActivity) return 'Researching';
     if (showGeneratingIndicator) return 'Generating';
     if (stream.isLoading) return 'Processing';
@@ -539,10 +871,207 @@ export const LangGraphChatApp: React.FC = () => {
   };
 
   const getStatusColor = (): string => {
+    if (showPreparingIndicator) return 'bg-blue-500 animate-pulse';
+    if (needsHumanFeedback) return 'bg-amber-500 animate-pulse';
     if (showToolActivity || showGeneratingIndicator || stream.isLoading) {
       return 'bg-green-500 animate-pulse';
     }
     return 'bg-gray-400';
+  };
+
+  // Event handlers
+  const handleSubmit = (input: string) => {
+    setIsPreparingResponse(true);
+    stream.submit({ 
+      messages: [{ type: "human", content: input }],
+      streamResumable: true
+    });
+  };
+
+  const handleStop = () => {
+    stream.stop();
+    
+    // Mark the last AI message as incomplete if it exists
+    setMessages(prev => {
+      const lastAIIndex = findLastIndex(prev, msg => msg.type === 'ai');
+      if (lastAIIndex >= 0) {
+        const updated = [...prev];
+        updated[lastAIIndex] = {
+          ...updated[lastAIIndex],
+          isIncomplete: true,
+          versions: updated[lastAIIndex].versions || [updated[lastAIIndex].content],
+          currentVersionIndex: updated[lastAIIndex].currentVersionIndex || 0
+        };
+        return updated;
+      }
+      return prev;
+    });
+  };
+
+  const handleNewThread = () => {
+    setThreadId(null);
+    setMessages([]);
+  };
+
+  const handleRegenerate = (messageId: string) => {
+    const messageIndex = messages.findIndex(msg => msg.id === messageId);
+    if (messageIndex === -1) return;
+
+    const aiMessage = messages[messageIndex];
+    if (aiMessage.type !== 'ai') return;
+
+    // Find the corresponding human message
+    const correspondingHumanMessage = [...messages.slice(0, messageIndex)]
+      .reverse().find(msg => msg.type === 'human');
+    
+    if (!correspondingHumanMessage) return;
+
+    // Mark as generating new version
+    setMessages(prev => prev.map(msg => 
+      msg.id === messageId 
+        ? { ...msg, isGeneratingVersion: true }
+        : msg
+    ));
+
+    // Use the same thread for regeneration (don't create new thread)
+    const regenerateInSameThread = async () => {
+      try {
+        // Use the existing thread but with a new run
+        const response = await fetch(`${apiUrl}/threads/${threadId}/runs/stream`, {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream'
+          },
+          body: JSON.stringify({
+            assistant_id: assistantId,
+            input: {
+              messages: [{ type: "human", content: correspondingHumanMessage.content }],
+              regenerate: true, // Add flag to indicate regeneration
+              streamResumable: true
+            }
+          })
+        });
+
+        if (!response.body) throw new Error('No response body');
+
+        const reader = response.body.getReader();
+        let newContent = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = new TextDecoder().decode(value);
+          const lines = chunk.split('\n').filter(line => line.trim());
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.event === 'messages/partial') {
+                  const content = data.data?.content;
+                  if (content && typeof content === 'string') {
+                    newContent = content;
+                  }
+                }
+              } catch (e) {
+                // Ignore parsing errors
+              }
+            }
+          }
+        }
+
+        // Add new version to existing message
+        if (newContent) {
+          setMessages(prev => prev.map(msg => {
+            if (msg.id === messageId) {
+              const versions = msg.versions || [msg.content];
+              return {
+                ...msg,
+                versions: [...versions, newContent],
+                currentVersionIndex: versions.length,
+                content: newContent,
+                isGeneratingVersion: false,
+                isIncomplete: false // Mark as complete
+              };
+            }
+            return msg;
+          }));
+        }
+      } catch (error) {
+        console.error('Regeneration failed:', error);
+        // Clear generating state
+        setMessages(prev => prev.map(msg => 
+          msg.id === messageId 
+            ? { ...msg, isGeneratingVersion: false }
+            : msg
+        ));
+      }
+    };
+
+    regenerateInSameThread();
+  };
+
+  const handleEditMessage = (messageId: string, newContent: string) => {
+    const messageIndex = messages.findIndex(msg => msg.id === messageId);
+    if (messageIndex === -1) return;
+
+    const message = messages[messageIndex];
+    if (message.type !== 'human') return;
+
+    // Update the message content
+    const updatedMessages = [...messages];
+    updatedMessages[messageIndex] = {
+      ...message,
+      content: newContent
+    };
+
+    // Remove all messages after this edited message
+    const messagesToKeep = updatedMessages.slice(0, messageIndex + 1);
+    setMessages(messagesToKeep);
+
+    // Resend the edited message
+    stream.submit({ 
+      messages: [{ type: "human", content: newContent }],
+      streamResumable: true
+    });
+  };
+
+  const handleResume = (messageId: string) => {
+    // Find the specific message to resume
+    const message = messages.find(msg => msg.id === messageId);
+    if (!message || !message.isIncomplete) return;
+
+    // Mark as resuming
+    setMessages(prev => prev.map(msg => 
+      msg.id === messageId 
+        ? { ...msg, isGeneratingVersion: true, isIncomplete: false }
+        : msg
+    ));
+
+    // Resume the stream for this specific message
+    stream.resume({
+      messages: [{ type: "human", content: messages.find(msg => msg.type === 'human' && msg.id === message.originalHumanMessageId)?.content || '' }],
+      continueFrom: messageId // Pass the message ID to continue from
+    });
+  };
+
+  const handleVersionChange = (messageId: string, versionIndex: number) => {
+    setMessages(prev => 
+      prev.map(msg => 
+        msg.id === messageId 
+          ? { ...msg, currentVersionIndex: versionIndex }
+          : msg
+      )
+    );
+  };
+
+  const handleHumanFeedback = (feedback: string) => {
+    stream.submit({ 
+      messages: [{ type: "human", content: feedback }],
+      streamResumable: true
+    });
   };
 
   return (
@@ -557,11 +1086,11 @@ export const LangGraphChatApp: React.FC = () => {
           <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <h1 className="text-xl font-bold text-gray-900">
-                Research Assistant
+                Enhanced Research Assistant
               </h1>
               <div className="h-6 w-px bg-gray-300"></div>
               <div className="text-sm text-gray-500">
-                AI-powered research and analysis
+                AI with carousel regeneration & human-in-the-loop
               </div>
             </div>
 
@@ -579,44 +1108,54 @@ export const LangGraphChatApp: React.FC = () => {
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-5xl mx-auto px-6 py-6">
             {/* Welcome Screen */}
-            {userMessages.length === 0 && !stream.isLoading && (
+            {messages.length === 0 && !stream.isLoading && (
               <div className="text-center py-20">
                 <div className="w-20 h-20 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-2xl">
                   <Brain className="w-10 h-10 text-white" />
                 </div>
                 <h2 className="text-3xl font-bold text-gray-900 mb-3">
-                  AI Research Assistant
+                  Enhanced AI Research Assistant
                 </h2>
                 <p className="text-gray-600 mb-8 max-w-md mx-auto text-lg leading-relaxed">
-                  Ask me anything and I'll research, analyze, and provide comprehensive answers using advanced AI tools.
+                  Advanced AI with carousel regeneration, resume capability, and human-in-the-loop collaboration.
                 </p>
-                <div className="flex justify-center gap-6 text-sm">
+                <div className="flex justify-center gap-6 text-sm flex-wrap">
                   <div className="flex items-center gap-2 text-gray-500">
                     <Search className="w-4 h-4 text-blue-500" />
                     Web Research
                   </div>
                   <div className="flex items-center gap-2 text-gray-500">
-                    <Brain className="w-4 h-4 text-purple-500" />
-                    AI Analysis
+                    <RotateCcw className="w-4 h-4 text-green-500" />
+                    Carousel Versions
                   </div>
                   <div className="flex items-center gap-2 text-gray-500">
-                    <Zap className="w-4 h-4 text-yellow-500" />
-                    Real-time Results
+                    <Play className="w-4 h-4 text-orange-500" />
+                    Resume Generation
+                  </div>
+                  <div className="flex items-center gap-2 text-gray-500">
+                    <AlertCircle className="w-4 h-4 text-amber-500" />
+                    Human Feedback
                   </div>
                 </div>
               </div>
             )}
 
             {/* Messages */}
-            {userMessages.map((message, index) => (
+            {messages.map((message, index) => (
               <MessageBubble
                 key={message.id}
                 message={message}
-                isLastMessage={index === userMessages.length - 1}
+                isLastMessage={index === messages.length - 1}
+                onRegenerate={message.type === 'ai' ? () => handleRegenerate(message.id) : undefined}
+                onResume={message.isIncomplete ? () => handleResume(message.id) : undefined}
+                onHumanFeedback={message.needsHumanFeedback ? handleHumanFeedback : undefined}
+                onEditMessage={message.type === 'human' ? handleEditMessage : undefined}
+                onVersionChange={(index) => handleVersionChange(message.id, index)}
               />
             ))}
 
             {/* Activity Indicators */}
+            {showPreparingIndicator && <PreparingIndicator />}
             {showToolActivity && <ToolActivityIndicator activity={toolActivity!} />}
             {showGeneratingIndicator && <GeneratingIndicator />}
 
@@ -629,11 +1168,11 @@ export const LangGraphChatApp: React.FC = () => {
         <ChatInput
           onSubmit={handleSubmit}
           isLoading={stream.isLoading}
-          onStop={stream.stop}
+          onStop={handleStop}
         />
       </div>
     </div>
   );
 };
 
-export default LangGraphChatApp;
+export default EnhancedLangGraphChatApp;
