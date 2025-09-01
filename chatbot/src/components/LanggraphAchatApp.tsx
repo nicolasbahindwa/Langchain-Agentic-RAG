@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
-import {EnhancedContentRenderer}  from './renders/EnhancedContentRenderer';
+import ContentRenderer  from './renders/genericRenderer';
 import { useStream } from "@langchain/langgraph-sdk/react";
 import type { Message as LangGraphMessage } from "@langchain/langgraph-sdk";
 import { 
@@ -559,7 +559,7 @@ const MessageBubble: React.FC<{
               // Normal Display Mode
               <>
                 {message.type === 'ai' ? (
-                  <EnhancedContentRenderer 
+                  <ContentRenderer 
                     content={currentContent} 
                     userQuery={userQuery} // Pass the user query for context
                   />
@@ -1162,6 +1162,7 @@ export const EnhancedLangGraphChatApp: React.FC = () => {
             {/* Scroll anchor */}
             <div ref={messagesEndRef} />
           </div>
+          
         </div>
 
         {/* Chat Input */}

@@ -9,10 +9,17 @@ from langchain_core.tools import tool
 from langchain_core.pydantic_v1 import BaseModel, Field
 from datetime import datetime
 import json
-
+from enum import Enum
+import re
 # ══════════════════════════════════════════════════════════════════════════════
 # UNIVERSAL LANGUAGE PROTOCOL SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
+
+class QuestionComplexity(Enum):
+    SIMPLE = "simple"
+    MODERATE = "moderate"
+    COMPLEX = "complex"
+    
 
 def get_language_protocol() -> str:
     """
@@ -84,6 +91,11 @@ class AgentState(TypedDict):
     current_language: str  # Current detected language (can change)
     previous_language: str  # Previous language (for comparison)
     language_changed: bool  # Flag if language switched
+    
+    question_complexity: Optional[str]  # simple|moderate|complex
+    complexity_reasoning: Optional[str]
+    optimized_queries: Optional[List[str]]
+    query_strategy: Optional[str]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # INITIALIZE MANAGERS
@@ -287,6 +299,7 @@ def format_search_results_for_answer(results: List[Dict[str, Any]]) -> str:
     
     return "\n".join(formatted)
 
+
 def evaluate_search_results_internal(user_query: str, search_results: List[Dict[str, Any]]) -> bool:
     """Simple evaluation without LLM - check if we have meaningful content."""
     if not search_results:
@@ -327,49 +340,185 @@ Do not provide final answers - just gather information using the tools."""
 
     return create_language_aware_prompt(base_prompt)
 
+def classify_and_optimize_query(user_query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Advanced question classification with query optimization and intent detection.
+    
+    Args:
+        user_query: The raw user question
+        context: Optional context from previous interactions
+        
+    Returns:
+        Dict with classification, optimized queries, intent analysis, and search strategy
+    """
+    
+    # Enhanced classification prompt with multiple dimensions
+    classification_prompt = f"""Analyze this question across multiple dimensions and provide comprehensive optimization:
+
+            ORIGINAL QUESTION: "{user_query}"
+            CONTEXT: {json.dumps(context or {}, indent=2)}
+
+            ANALYSIS FRAMEWORK:
+            1. COMPLEXITY: simple|moderate|complex
+            2. INTENT TYPE: factual|analytical|comparative|temporal|predictive|procedural
+            3. DOMAIN: technology|business|science|politics|entertainment|general
+            4. TIME SENSITIVITY: historical|current|future|timeless
+            5. ANSWER TYPE: definitive|exploratory|opinion|data_driven
+
+            OPTIMIZATION TASKS:
+            - Generate 3-5 optimized search queries (specific, focused, search-engine friendly)
+            - Identify key entities and concepts that need clarification
+            - Suggest query expansions for comprehensive coverage
+            - Detect potential ambiguities or missing context
+
+            Respond in JSON format:
+            {{
+                "analysis": {{
+                    "complexity": "simple|moderate|complex",
+                    "intent_type": "primary intent category",
+                    "domain": "subject domain",
+                    "time_sensitivity": "temporal aspect",
+                    "answer_type": "expected response format",
+                    "confidence": 0.85
+                }},
+                "optimization": {{
+                    "optimized_queries": [
+                        "specific search query 1",
+                        "specific search query 2", 
+                        "specific search query 3"
+                    ],
+                    "key_entities": ["entity1", "entity2"],
+                    "query_expansions": ["broader context query"],
+                    "potential_ambiguities": ["ambiguity1", "ambiguity2"],
+                    "search_strategy": "detailed strategy explanation"
+                }},
+                "enhancement_suggestions": {{
+                    "missing_context": ["what context might help"],
+                    "clarification_needed": ["what needs clarification"],
+                    "alternative_phrasings": ["alternative way to ask"]
+                }}
+            }}
+
+            SEARCH QUERY OPTIMIZATION RULES:
+            - Make queries specific and actionable
+            - Include relevant keywords for search engines
+            - Consider different angles and perspectives
+            - Optimize for both broad and specific search engines
+            - Include temporal markers when relevant"""
+
+    try:
+        response = llm.invoke([SystemMessage(content=classification_prompt)])
+        result = json.loads(response.content.strip())
+        
+        # Validate required fields
+        required_fields = ["analysis", "optimization", "enhancement_suggestions"]
+        if not all(field in result for field in required_fields):
+            raise ValueError("Missing required fields in classification response")
+            
+        return result
+        
+    except Exception as e:
+        # Enhanced fallback with basic analysis
+        return {
+            "analysis": {
+                "complexity": "moderate",
+                "intent_type": "factual",
+                "domain": "general",
+                "time_sensitivity": "current",
+                "answer_type": "exploratory",
+                "confidence": 0.5
+            },
+            "optimization": {
+                "optimized_queries": [user_query, f"{user_query} facts", f"{user_query} overview"],
+                "key_entities": [],
+                "query_expansions": [f"{user_query} detailed information"],
+                "potential_ambiguities": ["Classification failed - using fallback"],
+                "search_strategy": f"Fallback strategy due to error: {str(e)}"
+            },
+            "enhancement_suggestions": {
+                "missing_context": [],
+                "clarification_needed": [],
+                "alternative_phrasings": []
+            }
+        }
+
 def process_query_node(state: AgentState) -> Dict[str, Any]:
     """
-    Extract user query and prepare for language-aware processing.
-    Language detection will happen naturally in the agent node.
+    Enhanced query processing with comprehensive analysis and optimization.
     """
     msgs = state["messages"]
-    
-    # Get the latest user query
+
+    # Extract the latest user query
     user_query = ""
     for msg in reversed(msgs):
         if isinstance(msg, HumanMessage):
             user_query = msg.content
             break
+
+    # Build context from conversation history
+    context = {
+        "previous_language": state.get("current_language", "unknown"),
+        "has_previous_searches": bool(state.get("search_results")),
+        "conversation_length": len([m for m in msgs if isinstance(m, (HumanMessage, AIMessage))]),
+        "previous_complexity": state.get("question_complexity")
+    }
+
+    # Enhanced classification and optimization
+    analysis_result = classify_and_optimize_query(user_query, context)
     
-    # Get previous language state
-    previous_language = state.get("current_language", "unknown")
-    
+    # Extract key information
+    analysis = analysis_result["analysis"]
+    optimization = analysis_result["optimization"]
+    enhancements = analysis_result["enhancement_suggestions"]
+
     return {
         "user_query": user_query,
-        "previous_language": previous_language,
-        "current_language": "unknown",  # Will be updated by LLM
+        "previous_language": state.get("current_language", "unknown"),
+        "current_language": "unknown",
         "language_changed": False,
         "needs_clarification": False,
         "search_complete": False,
         "search_results": None,
-        "is_generating": False
+        "is_generating": False,
+        
+        # Enhanced analysis data
+        "question_complexity": analysis["complexity"],
+        "intent_type": analysis["intent_type"],
+        "domain": analysis["domain"],
+        "time_sensitivity": analysis["time_sensitivity"],
+        "answer_type": analysis["answer_type"],
+        "analysis_confidence": analysis["confidence"],
+        
+        # Optimization data
+        "optimized_queries": optimization["optimized_queries"],
+        "key_entities": optimization["key_entities"],
+        "query_expansions": optimization["query_expansions"],
+        "potential_ambiguities": optimization["potential_ambiguities"],
+        "search_strategy": optimization["search_strategy"],
+        
+        # Enhancement suggestions
+        "missing_context": enhancements["missing_context"],
+        "clarification_needed": enhancements["clarification_needed"],
+        "alternative_phrasings": enhancements["alternative_phrasings"]
     }
-
 def agent_node(state: AgentState) -> Dict[str, Any]:
     """
-    LangGraph node that detects language and decides which tools to call.
+    Enhanced agent node that uses complexity classification for better search strategy.
     """
     msgs = state["messages"]
     state_update = {"is_generating": False}
-    
+
     user_query = state.get("user_query", "")
     previous_language = state.get("previous_language", "unknown")
+    complexity = state.get("question_complexity", "moderate")
+    optimized_queries = state.get("optimized_queries", [user_query])
+    query_strategy = state.get("query_strategy", "")
 
     # Check if we just got NEW tool results
     def has_new_tool_results():
         if state.get("search_complete"):
             return False
-            
+
         for i in range(len(msgs) - 1, -1, -1):
             msg = msgs[i]
             if isinstance(msg, ToolMessage):
@@ -391,7 +540,6 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
 
     if has_new_tool_results():
         search_results = extract_search_results(state)
-        
         state_update.update({
             "messages": msgs,
             "search_results": search_results,
@@ -399,33 +547,49 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         })
         return state_update
 
-    # If search is already finished, do nothing
     if state.get("search_complete"):
         state_update["messages"] = msgs
         return state_update
 
-    # Prepare clean message list for LLM with language-aware system prompt
+    # Enhanced system prompt with complexity awareness
+    base_system_prompt = f"""You are a search agent with complexity awareness.
+
+QUESTION ANALYSIS:
+- Original Question: "{user_query}"
+- Complexity Level: {complexity.upper()}
+- Strategy: {query_strategy}
+- Optimized Queries: {', '.join(optimized_queries)}
+
+SEARCH STRATEGY BY COMPLEXITY:
+- SIMPLE: Use 1-2 focused searches with the most direct query
+- MODERATE: Use 2-3 searches to cover different aspects thoroughly  
+- COMPLEX: Use 3-4 comprehensive searches for deep research
+
+AVAILABLE TOOLS:
+- tavily_search: For latest, current, breaking, today/now queries
+- wikipedia_search: For background, historical, biographical, or evergreen facts
+- duckduckgo_search: For broad browsing or general web answers
+
+Use the optimized queries provided, but adapt them to the most appropriate search tools.
+Execute searches based on the complexity level - more complex questions need more comprehensive research."""
+
+    # Prepare clean message list with complexity-aware system prompt
     clean_msgs = []
     
-    # Add language-aware system message with context about previous language
     language_context = ""
     if previous_language != "unknown":
         language_context = f"Previous conversation was in: {previous_language}. Detect if user switched languages."
-    
-    system_prompt = create_language_aware_prompt(
-        system_preamble_for_agent(), 
-        language_context
-    )
-    clean_msgs.append(SystemMessage(content=system_prompt))
-    
+
+    enhanced_prompt = create_language_aware_prompt(base_system_prompt, language_context)
+    clean_msgs.append(SystemMessage(content=enhanced_prompt))
+
     # Add existing messages, skipping duplicate system messages
     for msg in msgs:
         if isinstance(msg, SystemMessage):
-            continue  # Skip, we already added our language-aware system message
+            continue
         clean_msgs.append(msg)
-    
+
     response = llm_with_tools.invoke(clean_msgs)
-    
     state_update["messages"] = [response]
     return state_update
 
@@ -471,12 +635,12 @@ def request_clarification(state: AgentState) -> Dict[str, Any]:
     # Base prompt for clarification
     base_prompt = f"""The user asked: "{user_query}"
 
-I couldn't find sufficient information to answer their question. Generate a polite clarification request asking the user to:
-1. Provide more specific details
-2. Rephrase with different keywords  
-3. Specify what aspect they're most interested in
+        I couldn't find sufficient information to answer their question. Generate a polite clarification request asking the user to:
+        1. Provide more specific details
+        2. Rephrase with different keywords  
+        3. Specify what aspect they're most interested in
 
-Keep it concise and helpful."""
+        Keep it concise and helpful."""
     
     # Add language context
     language_context = f"User's query language appears to be: {current_language}" if current_language != "unknown" else "Detect the user's language from their query above"
@@ -497,105 +661,205 @@ Keep it concise and helpful."""
     })
     return state_update
 
+ 
+
+
+# IMPROVED VISUALIZATION LOGIC FOR BACKEND
+
 def process_feedback(state: AgentState) -> Dict[str, Any]:
     """
-    Process human feedback and prepare for new search.
-    Allow language to change if user switches languages.
+    Enhanced feedback processing that combines original intent with clarification
+    to create an optimized query for better results.
     """
-    # Find the latest human message (the feedback)
+    msgs = state["messages"]
+    
+    # Get the latest feedback
     feedback = ""
-    for msg in reversed(state["messages"]):
+    for msg in reversed(msgs):
         if isinstance(msg, HumanMessage):
             feedback = msg.content
-            break   
+            break
     
-    # Keep track of previous language for comparison
+    # Get original query and context
+    original_query = state.get("user_query", "")
     previous_language = state.get("current_language", "unknown")
     
-    # Reset search state for new query, allow language detection on new feedback
+    # Create query rewriting prompt
+    rewriting_prompt = f"""INTELLIGENT QUERY REWRITING TASK:
+
+ORIGINAL QUESTION: "{original_query}"
+USER FEEDBACK/CLARIFICATION: "{feedback}"
+
+CONTEXT FROM PREVIOUS ATTEMPT:
+- Domain: {state.get('domain', 'unknown')}
+- Intent: {state.get('intent_type', 'unknown')}
+- Missing Context: {state.get('missing_context', [])}
+- Clarifications Needed: {state.get('clarification_needed', [])}
+
+TASK: Create an enhanced, comprehensive query that:
+1. Combines the original intent with the user's clarification
+2. Addresses any ambiguities or missing context
+3. Is more specific and searchable
+4. Maintains the user's core question while being more precise
+
+OPTIMIZATION RULES:
+- If feedback adds specificity, incorporate it into the query
+- If feedback changes direction, follow the new direction while keeping relevant context
+- If feedback provides examples, use them to clarify the scope
+- Make the result more searchable and less ambiguous
+
+Respond in JSON format:
+{{
+    "rewritten_query": "The enhanced, combined query",
+    "reasoning": "Why this rewrite is better",
+    "key_improvements": ["improvement1", "improvement2"],
+    "search_focus": "What to prioritize in search results"
+}}"""
+
+    try:
+        # Use the enhanced language protocol
+        enhanced_prompt = create_language_aware_prompt(rewriting_prompt, 
+            f"Original language: {previous_language}, maintain consistency")
+        
+        response = llm.invoke([SystemMessage(content=enhanced_prompt)])
+        rewrite_result = json.loads(response.content.strip())
+        
+        enhanced_query = rewrite_result.get("rewritten_query", feedback)
+        
+    except Exception as e:
+        # Fallback: combine original and feedback intelligently
+        if len(feedback.strip()) < len(original_query.strip()):
+            # Short feedback - likely clarification, combine them
+            enhanced_query = f"{original_query} - specifically: {feedback}"
+        else:
+            # Long feedback - likely new direction, use feedback but note original context
+            enhanced_query = feedback
+    
+    # Track language change capability
     return {
-        "user_query": feedback,
-        "previous_language": previous_language,  # Track previous for comparison
+        "user_query": enhanced_query,
+        "original_query": original_query,  # Keep for reference
+        "feedback_provided": feedback,
+        "previous_language": previous_language,
         "current_language": "unknown",  # Will be re-detected
         "language_changed": False,
         "needs_clarification": False,
         "search_complete": False,
         "search_results": None,
-        "is_generating": False
+        "is_generating": False,
+        "query_was_enhanced": True  # Flag for tracking improvements
     }
+    
+    
+def build_llm_prompt(
+    user_query: str,
+    search_results: List[Dict[str, Any]],
+    context: Dict[str, Any]
+) -> str:
+    sources = format_search_results_for_answer(search_results)
+
+    return f"""
+You are a senior data analyst and research expert.  
+Answer the user's question using ONLY the provided search results.
+
+Output formats:
+- Use plain text for narrative
+- Use <TABLE_DATA>...</TABLE_DATA> for structured tables
+- Use <GRAPH_DATA>...</GRAPH_DATA> for visualizable chart data
+- You may mix formats when appropriate
+
+STRICT FORMATS (must be valid JSON inside tags):
+
+1. <TABLE_DATA>
+{{
+  "columns": ["Column A", "Column B", "Column C"],
+  "rows": [
+    ["row1-col1", "row1-col2", "row1-col3"],
+    ["row2-col1", "row2-col2", "row2-col3"]
+  ]
+}}
+</TABLE_DATA>
+
+2. <GRAPH_DATA>
+{{
+  "type": "bar" | "line" | "pie",
+  "title": "Descriptive chart title",
+  "data": [
+    {{ "x": "Category A", "y": 123 }},
+    {{ "x": "Category B", "y": 456 }}
+  ],
+  "xLabel": "X axis label",
+  "yLabel": "Y axis label"
+}}
+</GRAPH_DATA>
+
+QUESTION: {user_query}
+
+CONTEXT HINTS:
+- Complexity: {context.get("question_complexity", "moderate")}
+- Intent: {context.get("intent_type", "factual")}
+- Domain: {context.get("domain", "general")}
+
+SEARCH RESULTS:
+{sources}
+
+INSTRUCTIONS:
+1. **Summarise**: key facts or figures (≤3 bullets).  
+2. **Analyse**: trends, anomalies, correlations, or drivers.  
+3. **Insight**: practical meaning—why it matters and to whom.  
+4. **Conclusion**: 1–2 clear takeaways or recommended next steps.  
+5. Where numeric data is present, always provide BOTH:
+   - A <TABLE_DATA> JSON table (columns + rows).  
+   - A <GRAPH_DATA> JSON chart (choose bar/line/pie).  
+6. Cite every claim inline with `[^source_index]` and list sources at the end in markdown.
+
+Answer now.
+"""
 
 
 def final_answer_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Generate comprehensive answer with language protocol and multiple format options.
-    """
     state_update = {"is_generating": True}
-    
-    search_results = state.get("search_results", [])
-    user_query = state.get("user_query", "")
+
+    user_query       = state.get("user_query", "")
+    search_results   = state.get("search_results", [])
     current_language = state.get("current_language", "unknown")
-    
-    # Enhanced base prompt with multiple format options
-    base_prompt = f"""User question: "{user_query}"
 
-Based on the search results below, provide a comprehensive answer in the MOST APPROPRIATE format:
+    # Lightweight context (no heavy analysis)
+    context = {
+        "question_complexity": state.get("question_complexity", "moderate"),
+        "intent_type":        state.get("intent_type", "factual"),
+        "domain":             state.get("domain", "general"),
+    }
 
-AVAILABLE FORMATS:
-1. TEXT: For general information, explanations, and narratives
-2. TABLE: For comparative data, lists, statistics, or structured information
-3. GRAPH: For trends, relationships, quantitative data, or visual patterns
-4. SOURCE CODE: For code examples, algorithms, or programming solutions
-5. PICTURE/IMAGE: For visual content (describe images found in search results)
+    prompt = build_llm_prompt(user_query, search_results, context)
 
-Choose the best format based on the content:
-- Use TABLES for data that can be compared side-by-side
-- Use GRAPHS for showing trends, distributions, or relationships
-- Use TEXT for explanations, stories, or unstructured information
-- Use SOURCE CODE for programming-related queries
-- Use PICTURE/IMAGE descriptions when visual content is relevant
+    if current_language != "unknown":
+        prompt = f"{prompt}\n\nRespond in the language: {current_language}"
 
-FORMATTING GUIDELINES:
-For TABLES:
-- Create a markdown table with clear headers
-- Ensure data is properly aligned
-- Include a title explaining what the table shows
+    try:
+        answer_response = llm_evaluator.invoke([SystemMessage(content=prompt)])
 
-For GRAPHS:
-- Describe the graph type (bar, line, pie, scatter, etc.)
-- Provide the data points in a structured format
-- Explain what the graph demonstrates
-- Use format: "GRAPH: [chart type] showing [title]\nDATA: x=[values], y=[values]"
+        state_update.update({
+            "messages": [AIMessage(content=answer_response.content)],
+            "is_generating": False,
+            # Optional: store lightweight context for follow-ups
+            "final_context": context,
+        })
 
-For SOURCE CODE:
-- Use markdown code blocks with language specification
-- Include comments and explanations
-- Format: ```python\n# Your code here\n```
+    except Exception as e:
+        fallback = format_search_results_for_answer(search_results[:3])
+        state_update.update({
+            "messages": [AIMessage(
+                content=f"I’m having trouble generating the full answer. "
+                        f"Here’s a quick summary:\n\n{fallback}"
+            )],
+            "is_generating": False,
+            "generation_error": str(e),
+        })
 
-For PICTURES/IMAGES:
-- Describe the image content in detail
-- Mention if any images were found in search results
-- Include image URLs if available
-
-SEARCH RESULTS:
-{format_search_results_for_answer(search_results)}
-
-Provide your answer in the most appropriate format for the content. If multiple formats are suitable, combine them effectively."""
-
-    # Add language context
-    language_context = f"User's query language: {current_language}. Translate any English sources naturally." if current_language != "unknown" else "Detect user's language and respond in the same language"
-    
-    # Create language-aware prompt
-    enforced_prompt = create_language_aware_prompt(base_prompt, language_context)
-    
-    answer_response = llm_evaluator.invoke([
-        SystemMessage(content=enforced_prompt)
-    ])
-    
-    state_update.update({
-        "messages": [AIMessage(content=answer_response.content)],
-        "is_generating": False
-    })
     return state_update
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ROUTING FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -620,6 +884,8 @@ def route_after_evaluation(state: AgentState) -> str:
         return "request_clarification"
     else:
         return "final_answer"
+    
+    
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BUILD THE DYNAMIC MULTILINGUAL GRAPH
