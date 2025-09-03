@@ -1,6 +1,10 @@
 import { useState, useCallback } from 'react';
 
-// Custom hook for URL search params
+/**
+ * Custom hook to manage URL search parameters with state synchronization
+ * @param key - The search parameter key to manage
+ * @returns A tuple with the current value and a setter function
+ */
 export function useSearchParam(key: string): [string | null, (value: string | null) => void] {
   const [value, setValue] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null;
@@ -11,13 +15,9 @@ export function useSearchParam(key: string): [string | null, (value: string | nu
   const update = useCallback((newValue: string | null) => {
     setValue(newValue);
     if (typeof window === 'undefined') return;
-    
     const url = new URL(window.location.href);
-    if (newValue == null) {
-      url.searchParams.delete(key);
-    } else {
-      url.searchParams.set(key, newValue);
-    }
+    if (newValue == null) url.searchParams.delete(key);
+    else url.searchParams.set(key, newValue);
     window.history.pushState({}, '', url.toString());
   }, [key]);
 

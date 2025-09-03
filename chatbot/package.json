@@ -12,6 +12,7 @@
   "dependencies": {
     "@langchain/core": "^0.3.72",
     "@langchain/langgraph-sdk": "^0.0.109",
+    "ky": "^1.9.1",
     "lucide-react": "^0.541.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
