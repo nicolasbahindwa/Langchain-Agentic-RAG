@@ -102,7 +102,7 @@ llm_evaluator = llm_manager.get_chat_model(
 
 search_manager = create_search_manager()
 
-@tool("tavily_search", args_schema=SearchInput)
+@tool("tavily_search", args_schema=SearchInput, parse_docstring=True)
 def tavily_search_current(query: str) -> Dict[str, Any]:
     """
     Use ONLY for current, latest, breaking news, or time-sensitive information.
@@ -145,7 +145,7 @@ def tavily_search_current(query: str) -> Dict[str, Any]:
     except Exception as e:
         return {"provider": "tavily_current", "query": query, "error": str(e)}
 
-@tool("multisearch", args_schema=SearchInput)
+@tool("multisearch", args_schema=SearchInput , parse_docstring=True)
 def multisearch_comprehensive(query: str) -> Dict[str, Any]:
     """
     Use for general queries, background information, analysis, or comprehensive research.
