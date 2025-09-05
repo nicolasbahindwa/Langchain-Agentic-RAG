@@ -40,7 +40,7 @@ class LLMManager:
             LLMProvider.OPENAI: {
                 'enabled': bool(config.api_keys.openai_api_key),
                 'api_key': config.api_keys.openai_api_key or "",
-                'default_model': 'gpt-3.5-turbo'
+                'default_model': 'gpt-4o-mini'
             }
         }
 

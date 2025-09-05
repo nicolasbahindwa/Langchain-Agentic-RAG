@@ -516,7 +516,7 @@ async def test_crawler():
         print(f"Loader used: {result.loader_used}")
         print(f"Content length: {len(result.content)} characters")
         if result.content:
-            preview = result.content[:200].replace('\n', ' ')
+            preview = result.content.replace('\n', ' ')
             print(f"Content preview: {preview}...")
     else:
         print("No results returned")
