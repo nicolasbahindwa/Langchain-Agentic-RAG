@@ -487,838 +487,285 @@
 #     print("All data will be unified in markdown with embedded JSON!")
 
 
-import json
-import re
-import asyncio
-import time
-from typing import Literal, Dict, List, Any, Optional, Tuple
+import os
+
+from typing import Annotated, List, Literal, Union, NotRequired
+
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolCallId, tool
+from langgraph.prebuilt import InjectedState
+from langgraph.types import Command
+
+
+
+from IPython.display import Image, display
+from langchain.chat_models import init_chat_model
+from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
+# from utils import format_messages
 from core.llm_manager import LLMManager, LLMProvider
-from core.search_manager import create_search_manager
-from deepagents import create_deep_agent
-import logging
-from functools import wraps
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import pandas as pd
-from datetime import datetime
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from langgraph.prebuilt.chat_agent_executor import AgentState
+from typing_extensions import TypedDict
 
-# Enhanced error handling and retry decorators
-def retry_on_api_error(max_retries=3, delay=2.0, backoff_factor=2.0):
-    """Decorator for retrying API calls with exponential backoff"""
-    def decorator(func):
-        @wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            last_exception = None
-            current_delay = delay
-            
-            for attempt in range(max_retries + 1):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    last_exception = e
-                    error_msg = str(e).lower()
-                    
-                    retryable_errors = [
-                        'server had an error', 'timeout', 'rate limit',
-                        'service unavailable', 'internal server error',
-                        'bad gateway', 'connection error'
-                    ]
-                    
-                    is_retryable = any(err in error_msg for err in retryable_errors)
-                    
-                    if attempt < max_retries and is_retryable:
-                        logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {current_delay}s...")
-                        await asyncio.sleep(current_delay)
-                        current_delay *= backoff_factor
-                    elif not is_retryable:
-                        logger.error(f"Non-retryable error: {e}")
-                        break
-                    else:
-                        logger.error(f"Max retries ({max_retries}) exceeded")
-                        break
-            
-            raise last_exception
-        
-        @wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            last_exception = None
-            current_delay = delay
-            
-            for attempt in range(max_retries + 1):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    last_exception = e
-                    error_msg = str(e).lower()
-                    
-                    retryable_errors = [
-                        'server had an error', 'timeout', 'rate limit',
-                        'service unavailable', 'internal server error',
-                        'bad gateway', 'connection error'
-                    ]
-                    
-                    is_retryable = any(err in error_msg for err in retryable_errors)
-                    
-                    if attempt < max_retries and is_retryable:
-                        logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {current_delay}s...")
-                        time.sleep(current_delay)
-                        current_delay *= backoff_factor
-                    elif not is_retryable:
-                        logger.error(f"Non-retryable error: {e}")
-                        break
-                    else:
-                        logger.error(f"Max retries ({max_retries}) exceeded")
-                        break
-            
-            raise last_exception
-        
-        return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
-    return decorator
+from prompts import WRITE_TODOS_DESCRIPTION
+from prompts import (TODO_USAGE_INSTRUCTIONS, LS_DESCRIPTION, READ_FILE_DESCRIPTION, WRITE_FILE_DESCRIPTION)
 
-# Initialize managers with error handling
-try:
-    manager = LLMManager()
-    llm = manager.get_chat_model(
-        provider=LLMProvider.OPENAI,
-        temperature=0.7,
-        request_timeout=60,
-        max_retries=3
-    )
-    search_manager = create_search_manager()
-    logger.info("✅ Managers initialized successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to initialize managers: {e}")
-    raise
 
-@retry_on_api_error(max_retries=3, delay=1.0)
-def multi_provider_search(
-    query: str,
-    max_results: int = 5,
-    topic: Literal["general", "news", "finance"] = "general",
-    include_raw_content: bool = True,
-) -> Dict[str, Any]:
-    """Search using ALL providers and consolidate results"""
-    try:
-        logger.info(f"🔍 Multi-provider search for: {query}")
-        
-        # Define all available providers
-        providers = ["tavily", "duckduckgo", "wikipedia"]
-        all_results = {}
-        consolidated_results = []
-        search_metadata = {
-            "query": query,
-            "providers_used": [],
-            "providers_failed": [],
-            "total_results": 0,
-            "search_timestamp": datetime.now().isoformat()
-        }
-        
-        # Search with each provider
-        for provider in providers:
-            try:
-                logger.info(f"🔍 Searching with {provider}...")
-                result = search_manager.search(
-                    query=query,
-                    provider=provider,
-                    max_results=max_results,
-                    include_raw_content=include_raw_content,
-                    topic=topic,
-                )
-                
-                if result and 'results' in result:
-                    all_results[provider] = result
-                    search_metadata["providers_used"].append(provider)
-                    
-                    # Add provider info to each result
-                    for res in result['results']:
-                        res['source_provider'] = provider
-                        res['confidence_score'] = calculate_source_confidence(res, provider)
-                        consolidated_results.append(res)
-                    
-                    logger.info(f"✅ {provider} returned {len(result['results'])} results")
-                else:
-                    logger.warning(f"⚠️ {provider} returned no results")
-                    search_metadata["providers_failed"].append(f"{provider}: No results")
-                    
-            except Exception as e:
-                logger.error(f"❌ {provider} search failed: {e}")
-                search_metadata["providers_failed"].append(f"{provider}: {str(e)}")
-                all_results[provider] = {"error": str(e), "results": []}
-        
-        # Sort consolidated results by confidence score
-        consolidated_results.sort(key=lambda x: x.get('confidence_score', 0), reverse=True)
-        search_metadata["total_results"] = len(consolidated_results)
-        
-        # Create comprehensive response
-        consolidated_response = {
-            "consolidated_results": consolidated_results[:max_results * len(providers)],
-            "provider_breakdown": all_results,
-            "search_metadata": search_metadata,
-            "data_quality": analyze_result_quality(consolidated_results),
-            "numeric_data_preview": extract_numeric_preview(consolidated_results)
-        }
-        
-        logger.info(f"✅ Multi-provider search completed. Total results: {len(consolidated_results)}")
-        return consolidated_response
-        
-    except Exception as e:
-        logger.error(f"❌ Multi-provider search failed: {e}")
-        return {
-            "consolidated_results": [],
-            "provider_breakdown": {},
-            "search_metadata": {
-                "query": query,
-                "error": str(e),
-                "providers_used": [],
-                "providers_failed": ["all"],
-                "total_results": 0
-            },
-            "data_quality": {"overall_score": 0, "issues": ["Search system failure"]},
-            "numeric_data_preview": []
-        }
+manager = LLMManager()
 
-def calculate_source_confidence(result: Dict, provider: str) -> float:
-    """Calculate confidence score for a search result"""
-    try:
-        score = 0.0
-        
-        # Base score by provider reliability
-        provider_scores = {"wikipedia": 0.9, "tavily": 0.8, "duckduckgo": 0.7}
-        score += provider_scores.get(provider, 0.5)
-        
-        # Content quality indicators
-        content = result.get('content', '') or result.get('snippet', '')
-        if content:
-            # Check for numeric data
-            if re.search(r'\d+(?:\.\d+)?%|\$[\d,]+|\d{4}|\d+(?:,\d{3})+', content):
-                score += 0.1
-            
-            # Check for authoritative terms
-            auth_terms = ['study', 'research', 'report', 'data', 'statistics', 'official']
-            if any(term in content.lower() for term in auth_terms):
-                score += 0.1
-        
-        # URL authority
-        url = result.get('url', '')
-        if url:
-            authoritative_domains = ['.gov', '.edu', '.org', 'wikipedia', 'reuters', 'bloomberg']
-            if any(domain in url for domain in authoritative_domains):
-                score += 0.2
-        
-        return min(score, 1.0)
-        
-    except Exception:
-        return 0.5
+model = manager.get_chat_model(
+    provider=LLMProvider.OPENAI,
+    model="gpt-4o-mini"
+)
 
-def analyze_result_quality(results: List[Dict]) -> Dict[str, Any]:
-    """Analyze overall quality of search results"""
-    try:
-        if not results:
-            return {"overall_score": 0, "issues": ["No results found"], "strengths": []}
-        
-        total_confidence = sum(r.get('confidence_score', 0) for r in results)
-        avg_confidence = total_confidence / len(results)
-        
-        # Count data-rich results
-        data_rich_count = sum(1 for r in results if has_numeric_data(r.get('content', '')))
-        
-        # Identify issues and strengths
-        issues = []
-        strengths = []
-        
-        if avg_confidence < 0.6:
-            issues.append("Low average source confidence")
-        else:
-            strengths.append("High-quality sources")
-            
-        if data_rich_count < len(results) * 0.3:
-            issues.append("Limited numeric data available")
-        else:
-            strengths.append("Rich numeric data found")
-        
-        return {
-            "overall_score": avg_confidence,
-            "data_richness": data_rich_count / len(results),
-            "total_sources": len(results),
-            "issues": issues,
-            "strengths": strengths
-        }
-        
-    except Exception as e:
-        return {"overall_score": 0, "issues": [f"Analysis error: {str(e)}"], "strengths": []}
-
-def has_numeric_data(content: str) -> bool:
-    """Check if content contains significant numeric data"""
-    try:
-        numeric_patterns = [
-            r'\d+(?:\.\d+)?%',  # Percentages
-            r'\$[\d,]+(?:\.\d+)?',  # Currency
-            r'\b\d{4}\b',  # Years
-            r'\d+(?:,\d{3})+',  # Large numbers with commas
-            r'\d+(?:\.\d+)?\s*(?:million|billion|thousand)',  # Scaled numbers
-        ]
-        return any(re.search(pattern, content) for pattern in numeric_patterns)
-    except Exception:
-        return False
-
-def extract_numeric_preview(results: List[Dict]) -> List[Dict]:
-    """Extract preview of numeric data from search results"""
-    try:
-        preview_data = []
-        for result in results[:5]:  # Preview from top 5 results
-            content = result.get('content', '') or result.get('snippet', '')
-            if has_numeric_data(content):
-                numbers = re.findall(r'\d+(?:\.\d+)?%|\$[\d,]+(?:\.\d+)?|\b\d{4}\b|\d+(?:,\d{3})+', content)
-                if numbers:
-                    preview_data.append({
-                        "source": result.get('url', 'Unknown'),
-                        "provider": result.get('source_provider', 'Unknown'),
-                        "sample_numbers": numbers[:3],  # First 3 numbers found
-                        "confidence": result.get('confidence_score', 0)
-                    })
-        return preview_data
-    except Exception:
-        return []
-
-@retry_on_api_error(max_retries=3, delay=1.0)
-def enhanced_data_extraction(content: str) -> Dict[str, Any]:
-    """Enhanced data extraction with comprehensive numeric analysis"""
-    try:
-        logger.info("📊 Starting enhanced data extraction...")
-        
-        if not content or len(content.strip()) == 0:
-            return create_empty_data_structure("Empty content provided")
-        
-        # Enhanced patterns for maximum data extraction
-        extraction_patterns = {
-            'percentages': r'(\d+(?:\.\d+)?%)',
-            'currency': r'([\$€£¥]\s*[\d,]+(?:\.\d{2})?)',
-            'years': r'\b((?:19|20)\d{2})\b',
-            'large_numbers': r'(\b\d{1,3}(?:,\d{3})+(?:\.\d+)?)',
-            'decimal_numbers': r'(\b\d+\.\d+\b)',
-            'growth_metrics': r'((?:grew|increased|rose|up|declined|fell|dropped|down)\s+(?:by\s+)?(\d+(?:\.\d+)?%?))',
-            'market_data': r'(market\s+share[^.!?\n]*?(\d+(?:\.\d+)?%?))',
-            'comparisons': r'(from\s+(\d+(?:\.\d+)?%?)\s+to\s+(\d+(?:\.\d+)?%?))',
-            'multipliers': r'((\d+|\w+)-fold)',
-            'scaled_numbers': r'(\b\d+(?:\.\d+)?)\s*(million|billion|thousand|vehicles|cars|units|people)',
-        }
-        
-        extracted_data = []
-        
-        # Extract using each pattern
-        for pattern_name, pattern in extraction_patterns.items():
-            try:
-                matches = re.finditer(pattern, content, re.IGNORECASE)
-                for match in matches:
-                    process_match(match, pattern_name, content, extracted_data)
-            except Exception as e:
-                logger.warning(f"⚠️ Pattern '{pattern_name}' failed: {e}")
-                continue
-        
-        # Remove duplicates and organize
-        unique_data = deduplicate_data(extracted_data)
-        organized_data = organize_data_by_category(unique_data)
-        
-        # Generate tables and charts data
-        table_data = generate_table_data(unique_data)
-        chart_data = generate_chart_data(organized_data)
-        
-        # Create comprehensive response
-        result = {
-            'metadata': {
-                'total_data_points': len(unique_data),
-                'extraction_timestamp': datetime.now().isoformat(),
-                'data_found': len(unique_data) > 0,
-                'text_length': len(content),
-                'extraction_success': True,
-                'data_categories': list(organized_data.keys())
-            },
-            'raw_data_points': unique_data,
-            'organized_data': organized_data,
-            'table_data': table_data,
-            'chart_data': chart_data,
-            'numeric_summary': generate_numeric_summary(unique_data)
-        }
-        
-        logger.info(f"✅ Enhanced extraction completed. Found {len(unique_data)} data points")
-        return result
-        
-    except Exception as e:
-        logger.error(f"❌ Enhanced data extraction failed: {e}")
-        return create_empty_data_structure(f"Extraction error: {str(e)}")
-
-def process_match(match, pattern_name, content, extracted_data):
-    """Process a regex match and extract structured data"""
-    try:
-        full_match = match.group(0)
-        position = match.start()
-        
-        # Extract context (surrounding text)
-        context_start = max(0, position - 100)
-        context_end = min(len(content), position + len(full_match) + 100)
-        context = content[context_start:context_end]
-        
-        # Extract numeric values
-        numbers = re.findall(r'\d+(?:\.\d+)?', full_match)
-        
-        for num_str in numbers:
-            try:
-                numeric_value = float(num_str)
-                
-                # Extract additional metadata
-                year = extract_year_from_context(context)
-                entity = extract_entity_from_context(context)
-                unit = extract_unit_from_match(full_match)
-                
-                extracted_data.append({
-                    'value': numeric_value,
-                    'original_text': full_match.strip(),
-                    'context': context.strip(),
-                    'data_type': pattern_name,
-                    'year': year,
-                    'entity': entity,
-                    'unit': unit,
-                    'position': position,
-                    'confidence': calculate_data_confidence(full_match, context, pattern_name)
-                })
-                
-            except (ValueError, TypeError):
-                continue
-                
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to process match: {e}")
-
-def extract_year_from_context(context: str) -> Optional[int]:
-    """Extract year from context"""
-    year_match = re.search(r'\b((?:19|20)\d{2})\b', context)
-    return int(year_match.group(1)) if year_match else None
-
-def extract_entity_from_context(context: str) -> Optional[str]:
-    """Extract entity/company name from context"""
-    # Common entity patterns
-    entity_patterns = [
-        r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b(?=\s+(?:sales|revenue|market|share|grew|increased))',
-        r'\b(Tesla|BYD|Ford|GM|Volkswagen|Toyota|BMW|Mercedes|Audi|Nissan|Hyundai)\b',
-        r'\b([A-Z]{2,})\b'  # Acronyms
-    ]
+class Todo(TypedDict):
+    """A structured task item for tracking progress through complex workflows.
     
-    for pattern in entity_patterns:
-        match = re.search(pattern, context, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    return None
+    Attributes:
+        content: Short, specific description of the task
+        status: Current state - pending, in_progress, or completed
+    """
+    content: str
+    status: Literal["pending", "in_progress", "completed"]
 
-def extract_unit_from_match(match_text: str) -> Optional[str]:
-    """Extract measurement unit from match"""
-    unit_pattern = r'\b(vehicles|cars|units|people|million|billion|thousand|%|\$|€|£|¥|USD|EUR)\b'
-    unit_match = re.search(unit_pattern, match_text.lower())
-    return unit_match.group(1) if unit_match else None
-
-def calculate_data_confidence(match_text: str, context: str, pattern_name: str) -> float:
-    """Calculate confidence score for extracted data"""
-    try:
-        score = 0.5  # Base score
+def file_reducer(left, right):
+    """Merge two file dictionaries, with right side taking precedence.
+    
+    Used as a reducer function for the files field in agent state,
+    allowing incremental updates to the virtual file system.
+    
+    Args:
+        left: Left side dictionary (existing files)
+        right: Rigt side dictionary (new/updates files)
         
-        # Pattern-based confidence
-        pattern_confidence = {
-            'percentages': 0.9,
-            'currency': 0.8,
-            'years': 0.7,
-            'large_numbers': 0.6,
-            'growth_metrics': 0.8
-        }
-        score += pattern_confidence.get(pattern_name, 0.5) * 0.3
-        
-        # Context quality indicators
-        quality_indicators = ['official', 'report', 'study', 'data', 'statistics']
-        if any(indicator in context.lower() for indicator in quality_indicators):
-            score += 0.2
-            
-        return min(score, 1.0)
-    except Exception:
-        return 0.5
+    Returns:
+        Merged disctionary with right values overringing left values
+    """
+    if left is None:
+        return right
+    elif right is None:
+        return left
+    else:
+        return {**left, **right}
 
-def deduplicate_data(data_list: List[Dict]) -> List[Dict]:
-    """Remove duplicate data points"""
-    try:
-        seen = set()
-        unique_data = []
-        
-        for item in sorted(data_list, key=lambda x: x['position']):
-            key = (item['value'], item['data_type'], item['year'], item['entity'])
-            if key not in seen:
-                seen.add(key)
-                unique_data.append(item)
-        
-        return unique_data
-    except Exception:
-        return data_list
 
-def organize_data_by_category(data_list: List[Dict]) -> Dict[str, Any]:
-    """Organize data by categories for analysis"""
-    try:
-        categories = {
-            'temporal_data': {},
-            'financial_data': {},
-            'performance_metrics': {},
-            'market_data': {},
-            'comparative_data': {}
-        }
-        
-        for item in data_list:
-            # Categorize by data type and content
-            if item['year']:
-                if item['entity'] not in categories['temporal_data']:
-                    categories['temporal_data'][item['entity']] = {}
-                categories['temporal_data'][item['entity']][str(item['year'])] = item
-            
-            if item['data_type'] in ['currency', 'financial']:
-                entity = item['entity'] or 'general'
-                if entity not in categories['financial_data']:
-                    categories['financial_data'][entity] = []
-                categories['financial_data'][entity].append(item)
-            
-            # Add to other categories based on patterns
-            if 'market' in item['context'].lower():
-                entity = item['entity'] or 'general'
-                if entity not in categories['market_data']:
-                    categories['market_data'][entity] = []
-                categories['market_data'][entity].append(item)
-        
-        return categories
-    except Exception:
-        return {}
+class DeepAgentState(AgentState):
+    """Extended agent state that includes task tracking and virtual file system.
 
-def generate_table_data(data_list: List[Dict]) -> Dict[str, Any]:
-    """Generate table-ready data structures"""
-    try:
-        # Summary table
-        summary_table = []
-        for item in data_list:
-            summary_table.append({
-                'Entity': item.get('entity', 'N/A'),
-                'Year': item.get('year', 'N/A'),
-                'Value': item['value'],
-                'Unit': item.get('unit', 'N/A'),
-                'Type': item['data_type'],
-                'Confidence': f"{item.get('confidence', 0):.1%}"
-            })
-        
-        # Detailed analysis table
-        detailed_table = []
-        for item in data_list:
-            detailed_table.append({
-                'Data Point': item['original_text'],
-                'Numeric Value': item['value'],
-                'Context': item['context'][:100] + '...' if len(item['context']) > 100 else item['context'],
-                'Source Position': item['position'],
-                'Confidence Score': f"{item.get('confidence', 0):.1%}"
-            })
-        
-        return {
-            'summary_table': summary_table,
-            'detailed_table': detailed_table,
-            'total_records': len(data_list)
-        }
-    except Exception:
-        return {'summary_table': [], 'detailed_table': [], 'total_records': 0}
+    Inherits from LangGraph's AgentState and adds:
+    - todos: List of Todo items for task planning and progress tracking
+    - files: Virtual file system stored as dict mapping filenames to content
+    """
 
-def generate_chart_data(organized_data: Dict) -> Dict[str, Any]:
-    """Generate chart-ready data structures"""
-    try:
-        chart_configs = {}
-        
-        # Time series charts
-        for entity, yearly_data in organized_data.get('temporal_data', {}).items():
-            if len(yearly_data) > 1:
-                years = sorted(yearly_data.keys())
-                values = [yearly_data[year]['value'] for year in years]
-                
-                chart_configs[f'timeseries_{entity}'] = {
-                    'type': 'line',
-                    'title': f'{entity} - Temporal Analysis',
-                    'data': {
-                        'labels': years,
-                        'values': values,
-                        'entity': entity
-                    }
-                }
-        
-        # Comparison charts
-        entities_data = {}
-        for item_list in organized_data.values():
-            if isinstance(item_list, dict):
-                for entity, data in item_list.items():
-                    if entity not in entities_data:
-                        entities_data[entity] = []
-                    if isinstance(data, list):
-                        entities_data[entity].extend(data)
-                    else:
-                        entities_data[entity].append(data)
-        
-        if len(entities_data) > 1:
-            chart_configs['entity_comparison'] = {
-                'type': 'bar',
-                'title': 'Entity Comparison',
-                'data': {
-                    'entities': list(entities_data.keys()),
-                    'values': [len(data) for data in entities_data.values()],
-                    'description': 'Number of data points per entity'
-                }
-            }
-        
-        return chart_configs
-    except Exception:
-        return {}
+    todos: NotRequired[list[Todo]]
+    files: Annotated[NotRequired[dict[str, str]], file_reducer]
+    
 
-def generate_numeric_summary(data_list: List[Dict]) -> Dict[str, Any]:
-    """Generate summary statistics"""
-    try:
-        if not data_list:
-            return {'total_points': 0, 'summary': 'No numeric data found'}
-        
-        values = [item['value'] for item in data_list if isinstance(item['value'], (int, float))]
-        
-        summary = {
-            'total_data_points': len(data_list),
-            'numeric_values_count': len(values),
-            'value_range': {
-                'min': min(values) if values else 0,
-                'max': max(values) if values else 0,
-                'average': sum(values) / len(values) if values else 0
-            },
-            'data_types_found': list(set(item['data_type'] for item in data_list)),
-            'entities_found': list(set(item['entity'] for item in data_list if item['entity'])),
-            'years_covered': sorted(list(set(item['year'] for item in data_list if item['year'])))
-        }
-        
-        return summary
-    except Exception:
-        return {'total_points': 0, 'summary': 'Summary generation failed'}
 
-def create_empty_data_structure(error_msg: str) -> Dict[str, Any]:
-    """Create empty data structure for error cases"""
-    return {
-        'metadata': {
-            'total_data_points': 0,
-            'extraction_timestamp': datetime.now().isoformat(),
-            'data_found': False,
-            'extraction_success': False,
-            'error': error_msg
-        },
-        'raw_data_points': [],
-        'organized_data': {},
-        'table_data': {'summary_table': [], 'detailed_table': [], 'total_records': 0},
-        'chart_data': {},
-        'numeric_summary': {'total_points': 0, 'summary': error_msg}
-    }
+@tool(description=WRITE_TODOS_DESCRIPTION,parse_docstring=True)
+def write_todos(
+    todos: list[Todo], tool_call_id: Annotated[str, InjectedToolCallId]
+) -> Command:
+    """Create or update the agent's TODO list for task planning and tracking.
 
-# Enhanced agent instructions
-agent_instructions = """You are a comprehensive research coordinator that ALWAYS uses ALL available search providers and delivers complete reports with numeric proof.
+    Args:
+        todos: List of Todo items with content and status
+        tool_call_id: Tool call identifier for message response
 
-CRITICAL WORKFLOW:
-1. MULTI-PROVIDER SEARCH: Always use multi_provider_search() to get data from ALL providers (Tavily, DuckDuckGo, Wikipedia)
-2. DATA CONSOLIDATION: Merge and analyze results from all providers
-3. NUMERIC EXTRACTION: Use enhanced_data_extraction() on ALL content to find numeric proof
-4. EVIDENCE COMPILATION: Create tables and charts proving your findings
-5. COMPREHENSIVE REPORTING: Generate complete report with all evidence
-
-SEARCH STRATEGY:
-- Use broad queries initially, then specific data-focused queries
-- Always search for: "[topic] statistics", "[topic] data", "[topic] numbers", "[topic] research"
-- Consolidate results from all providers for maximum coverage
-- Extract numeric evidence from ALL sources
-
-EVIDENCE REQUIREMENTS:
-- Find numerical proof for ALL claims
-- Create data tables showing evidence
-- Generate charts when temporal or comparative data exists
-- Calculate confidence scores for all data points
-- Cross-reference data across multiple sources
-
-FINAL OUTPUT: Always end with the complete report from report_writer subagent containing:
-- Consolidated multi-provider search results
-- Comprehensive data analysis with tables/charts
-- Numeric proof supporting all conclusions
-- Source attribution with confidence scores"""
-
-# Enhanced subagents
-content_classifier_subagent = {
-    "name": "content-classifier",
-    "description": "Classifies content and determines search strategy",
-    "prompt": """Analyze the query and provide classification plus search strategy.
-
-    RESPONSE FORMAT (JSON):
-    {
-        "classification": "safe" | "sensitive" | "banned",
-        "search_strategy": {
-            "primary_queries": ["query1", "query2", "query3"],
-            "data_focused_queries": ["data query1", "statistics query2"],
-            "expected_data_types": ["percentages", "currency", "years", "growth_metrics"]
-        },
-        "providers_to_emphasize": ["tavily", "wikipedia", "duckduckgo"],
-        "confidence": "high" | "medium" | "low"
-    }"""
-}
-
-data_visualizer_subagent = {
-    "name": "data-visualizer", 
-    "description": "Creates visualization strategy and chart specifications",
-    "prompt": """Analyze extracted data and create comprehensive visualization plan.
-
-    RESPONSE FORMAT (JSON):
-    {
-        "visualization_strategy": {
-            "primary_charts": [
-                {
-                    "type": "line" | "bar" | "pie" | "scatter" | "table",
-                    "title": "Chart Title",
-                    "data_source": "path.to.data",
-                    "purpose": "What this chart proves/shows"
-                }
+    Returns:
+        Command to update agent state with new TODO list
+    """
+    return Command(
+        update={
+            "todos": todos,
+            "messages": [
+                ToolMessage(f"Updated todo list to {todos}", tool_call_id=tool_call_id)
             ],
-            "data_tables": [
-                {
-                    "title": "Table Title", 
-                    "columns": ["col1", "col2", "col3"],
-                    "data_source": "path.to.table.data",
-                    "purpose": "What this table proves"
-                }
-            ]
-        },
-        "evidence_strength": "strong" | "moderate" | "weak",
-        "numeric_proof_summary": "Summary of numeric evidence found"
-    }"""
-}
-
-report_writer_subagent = {
-    "name": "report-writer",
-    "description": "Creates the final comprehensive report with all evidence",
-    "prompt": """Create a complete research report with ALL numeric evidence and visualizations.
-
-    MANDATORY STRUCTURE:
-
-    # 📊 Research Report: [Topic]
-
-    ## 🎯 Executive Summary
-    
-    **Key Findings with Numeric Proof:**
-    • [Finding 1 with specific numbers and sources]
-    • [Finding 2 with specific numbers and sources] 
-    • [Finding 3 with specific numbers and sources]
-
-    **Data Sources:** [List all providers used]
-    **Evidence Strength:** [Strong/Moderate/Weak based on data quality]
-
-    ## 📋 Multi-Provider Search Results
-
-    ### Consolidated Findings
-    [Summary of what each provider contributed]
-
-    ### Source Quality Analysis
-    | Provider | Results Found | Confidence Score | Data Quality |
-    |----------|---------------|------------------|--------------|
-    | Wikipedia | X results | Y% | High/Medium/Low |
-    | Tavily | X results | Y% | High/Medium/Low |
-    | DuckDuckGo | X results | Y% | High/Medium/Low |
-
-    ## 📊 Numeric Evidence & Data Analysis
-
-    ### Summary Statistics Table
-    [Insert table_data.summary_table as markdown table]
-
-    ### Detailed Data Points
-    [Insert table_data.detailed_table as markdown table]
-
-    ### Key Numeric Findings
-    [List the most important numbers found with context]
-
-    ## 📈 Data Visualizations
-
-    ### Chart Recommendations
-    [For each chart in chart_data, provide:]
-    - **Chart Type:** [line/bar/pie/etc]
-    - **Title:** [Chart title]
-    - **Data Shown:** [What the chart displays]
-    - **Proof Provided:** [What this chart proves about the topic]
-
-    ### Temporal Analysis
-    [If time series data exists, show trends over time]
-
-    ### Comparative Analysis  
-    [If comparative data exists, show entity comparisons]
-
-    ## 💡 Evidence-Based Insights
-
-    ### Proven Conclusions
-    [Only conclusions supported by numeric evidence]
-
-    ### Data Confidence Assessment
-    [Assess reliability of findings based on source quality and data consistency]
-
-    ### Cross-Source Validation
-    [Where multiple sources confirm the same data points]
-
-    ## 🎯 Final Assessment
-
-    ### Numeric Proof Summary
-    - **Total Data Points Found:** [Number]
-    - **High Confidence Findings:** [Number] 
-    - **Cross-Validated Claims:** [Number]
-    - **Evidence Quality:** [Strong/Moderate/Weak]
-
-    ### Recommendations
-    [Based on the numeric evidence found]
-
-    ---
-    **Report Generated:** [Current timestamp]
-    **Sources Used:** [All providers]
-    **Evidence Quality:** [Assessment]
-
-    CRITICAL: Include ALL numeric data found. Create actual markdown tables from the data. Reference specific numbers throughout."""
-}
-
-# Create the enhanced agent
-try:
-    app = create_deep_agent(
-        tools=[multi_provider_search, enhanced_data_extraction],
-        instructions=agent_instructions,
-        subagents=[
-            content_classifier_subagent,
-            data_visualizer_subagent, 
-            report_writer_subagent
-        ],
-        model=llm,
-        interrupt_config={}
+        }
     )
-    logger.info("✅ Enhanced multi-provider research agent created successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to create enhanced agent: {e}")
-    raise
+    
 
-if __name__ == "__main__":
-    print("🚀 ENHANCED MULTI-PROVIDER RESEARCH AGENT v7.0")
-    print("="*80)
-    print("✅ GUARANTEED MULTI-PROVIDER SEARCH:")
-    print("   🔍 Tavily: Latest specialized sources and real-time data")
-    print("   🦆 DuckDuckGo: Diverse perspectives and current information")  
-    print("   📚 Wikipedia: Comprehensive background and verified data")
-    print("   🔄 Automatic result consolidation and confidence scoring")
-    print("")
-    print("✅ COMPREHENSIVE NUMERIC PROOF:")
-    print("   📊 Enhanced pattern matching for all numeric data types")
-    print("   📈 Automatic table and chart generation from found data")
-    print("   🎯 Cross-source validation and confidence assessment") 
-    print("   📋 Evidence-based conclusions with specific numbers")
-    print("")
-    print("✅ STREAMABLE REPORT OUTPUT:")
-    print("   📄 Complete markdown report with embedded tables/charts")
-    print("   🔍 Multi-provider source attribution")
-    print("   📊 Comprehensive data visualization recommendations")
-    print("   🎯 Evidence quality assessment and confidence scoring")
-    print("")
-    print("Agent ready for evidence-based research with numeric proof!")
-    print("="*80)
+
+@tool(parse_docstring=True)
+def read_todos(
+    state: Annotated[DeepAgentState, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> str:
+    """Read the current TODO list from the agent state.
+
+    This tool allows the agent to retrieve and review the current TODO list
+    to stay focused on remaining tasks and track progress through complex workflows.
+
+    Args:
+        state: Injected agent state containing the current TODO list
+        tool_call_id: Injected tool call identifier for message tracking
+
+    Returns:
+        Formatted string representation of the current TODO list
+    """
+    todos = state.get("todos", [])
+    if not todos:
+        return "No todos currently in the list."
+
+    result = "Current TODO List:\n"
+    for i, todo in enumerate(todos, 1):
+        status_emoji = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}
+        emoji = status_emoji.get(todo["status"], "❓")
+        result += f"{i}. {emoji} {todo['content']} ({todo['status']})\n"
+
+    return result.strip()
+
+
+search_result = """The Model Context Protocol (MCP) is an open standard protocol developed 
+by Anthropic to enable seamless integration between AI models and external systems like 
+tools, databases, and other services. It acts as a standardized communication layer, 
+allowing AI models to access and utilize data from various sources in a consistent and 
+efficient manner. Essentially, MCP simplifies the process of connecting AI assistants 
+to external services by providing a unified language for data exchange. """
+
+
+# Mock search tool
+@tool(parse_docstring=True)
+def web_search(
+    query: str,
+):
+    """Search the web for information on a specific topic.
+
+    This tool performs web searches and returns relevant results
+    for the given query. Use this when you need to gather information from
+    the internet about any topic.
+
+    Args:
+        query: The search query string. Be specific and clear about what
+               information you're looking for.
+
+    Returns:
+        Search results from search engine.
+
+    Example:
+        web_search("machine learning applications in healthcare")
+    """
+    return search_result
+
+
+
+
+
+
+@tool(description=LS_DESCRIPTION)
+def ls(state: Annotated[DeepAgentState, InjectedState]) -> list[str]:
+    """List all files in the virtual file system."""
+    return list(state.get("files", {}))
+
+@tool(description=READ_FILE_DESCRIPTION)
+def read_file(
+    file_path:str,
+    state: Annotated[DeepAgentState, InjectedState],
+    offset: int = 0,
+    limit: int = 2000,
+) -> str:
+    """Read file content from virtual filesystem with optional offset and limit
+    
+    Args: 
+        file_path: Path to the file to read
+        state: Agent state containing virtual filesystem
+        offset: Line number to start reading from (default: 0)
+        limit: Maximum number of lines to read (default: 2000)
+    
+    Returns:
+        Formatted file content with line numbers, or error message if file not found
+    """
+    files = state.get("files", {})
+    if file_path not in files:
+        return f"Error: File '{file_path}' not found"
+
+    content = files[file_path]
+    if not content:
+        return "System reminder: File exists but has empty contents"
+
+    lines = content.splitlines()
+    start_idx = offset
+    end_idx = min(start_idx + limit, len(lines))
+
+    if start_idx >= len(lines):
+        return f"Error: Line offset {offset} exceeds file length ({len(lines)} lines)"
+
+    result_lines = []
+    for i in range(start_idx, end_idx):
+        line_content = lines[i][:2000]  # Truncate long lines
+        result_lines.append(f"{i + 1:6d}\t{line_content}")
+
+    return "\n".join(result_lines)
+
+
+@tool(description=WRITE_FILE_DESCRIPTION, parse_docstring=True)
+def write_file(
+    file_path: str,
+    content: str,
+    state: Annotated[DeepAgentState, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Write content to a file in the virtual filesystem.
+
+    Args:
+        file_path: Path where the file should be created/updated
+        content: Content to write to the file
+        state: Agent state containing virtual filesystem (injected in tool node)
+        tool_call_id: Tool call identifier for message response (injected in tool node)
+
+    Returns:
+        Command to update agent state with new file content
+    """
+    files = state.get("files", {})
+    files[file_path] = content
+    return Command(
+        update={
+            "files": files,
+            "messages": [
+                ToolMessage(f"Updated file {file_path}", tool_call_id=tool_call_id)
+            ],
+        }
+    )
+
+
+FILE_USAGE_INSTRUCTIONS = """You have access to a virtual file system to help you retain and save context.                                  
+                                                                                                                
+## Workflow Process                                                                                            
+1. **Orient**: Use ls() to see existing files before starting work                                             
+2. **Save**: Use write_file() to store the user's request so that we can keep it for later                     
+3. **Read**: Once you are satisfied with the collected sources, read the saved file and use it to ensure that you directly answer the user's question."""
+
+# Add mock research instructions
+SIMPLE_RESEARCH_INSTRUCTIONS = """IMPORTANT: Just make a single call to the web_search tool and use the result provided by the tool to answer the user's question."""
+
+# Full prompt
+INSTRUCTIONS = (
+    FILE_USAGE_INSTRUCTIONS + "\n\n" + "=" * 80 + "\n\n" + SIMPLE_RESEARCH_INSTRUCTIONS
+)
+
+
+
+# tools = [ls,read_file, write_file, web_search, write_todos, web_search, read_todos]
+tools = [ls,read_file, write_file, web_search]
+
+# Add mock research instructions
+SIMPLE_RESEARCH_INSTRUCTIONS = """IMPORTANT: Just make a single call to the web_search tool and use the result provided by the tool to answer the user's question."""
+
+# Create agent
+# app = create_react_agent(
+#     model,
+#     tools,
+#     prompt=TODO_USAGE_INSTRUCTIONS
+#     + "\n\n"
+#     + "=" * 80
+#     + "\n\n"
+#     + SIMPLE_RESEARCH_INSTRUCTIONS,
+#     state_schema=DeepAgentState,
+# )
+
+
+app = create_react_agent(
+    model, tools, prompt=INSTRUCTIONS, state_schema=DeepAgentState
+)
+
